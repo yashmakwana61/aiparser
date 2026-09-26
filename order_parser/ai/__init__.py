@@ -1,0 +1,1 @@
+"""Prompt templates for AI order extraction (Puter AI gateway)."""

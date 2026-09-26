@@ -1,0 +1,54 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException, Query, Request
+
+from order_parser.api.auth import security_dependencies
+from order_parser.services.pipeline import OrderPipeline
+
+router = APIRouter(prefix="/orders", tags=["orders"], dependencies=security_dependencies())
+
+
+def _pipeline(request: Request) -> OrderPipeline:
+    pipeline = getattr(request.app.state, "pipeline", None)
+    if pipeline is None:
+        raise HTTPException(status_code=503, detail="Pipeline is not initialized")
+    return pipeline
+
+
+def _pending_store(request: Request):
+    store = getattr(_pipeline(request), "pending_store", None)
+    if store is None:
+        raise HTTPException(status_code=503, detail="Pending store is not initialized")
+    return store
+
+
+@router.get("")
+async def list_orders(
+    request: Request,
+    status: str | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict:
+    """Review queue, newest first. Bounded pages keep responses predictable."""
+    store = _pending_store(request)
+    matching = store.list(status=status)
+    page = matching[offset : offset + limit]
+    return {"orders": page, "total": len(matching), "limit": limit, "offset": offset}
+
+
+@router.get("/{order_id}")
+async def get_order(order_id: str, request: Request) -> dict:
+    record = _pending_store(request).get(order_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Order not found")
+    return {"order": record}
+
+
+@router.post("/{order_id}/confirm")
+async def confirm_order(order_id: str, request: Request) -> dict:
+    return _pipeline(request).confirm_order(order_id, actor="api")
+
+
+@router.post("/{order_id}/reject")
+async def reject_order(order_id: str, request: Request) -> dict:
+    return _pipeline(request).reject_order(order_id, actor="api")

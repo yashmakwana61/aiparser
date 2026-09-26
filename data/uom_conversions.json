@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "conversions": [
+    {
+      "match": ["dozen", "dz", "12 pack"],
+      "to_uom_id": null,
+      "to_uom_name": "Units",
+      "factor": 12.0,
+      "approved_by": "seed"
+    },
+    {
+      "match": ["half dozen"],
+      "to_uom_id": null,
+      "to_uom_name": "Units",
+      "factor": 6.0,
+      "approved_by": "seed"
+    }
+  ]
+}

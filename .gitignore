@@ -1,0 +1,24 @@
+# Secrets - NEVER commit (live tokens live here)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv*/
+*.egg-info/
+
+# Test / dev caches
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime data - local state, job records, uploads, audit logs
+logs/
+order_parser/logs/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

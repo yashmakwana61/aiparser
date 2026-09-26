@@ -1,0 +1,5 @@
+# Replace yourdomain.com with your real domain (DNS A-record -> server IP).
+# Caddy provisions a free Let's Encrypt certificate automatically.
+yourdomain.com {
+	reverse_proxy parser:8000
+}
