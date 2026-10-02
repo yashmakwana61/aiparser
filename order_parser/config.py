@@ -23,11 +23,47 @@ class Settings(BaseSettings):
     disk_min_free_warning_gb: float = Field(default=5.0)
     disk_min_free_error_gb: float = Field(default=1.0)
 
-    # Puter AI gateway (OpenAI-compatible endpoint, token from puter.com/dashboard)
+    # Legacy Puter AI gateway (retained for VisionParser rollback only).
+    # The production text-extraction path no longer uses Puter/OpenAI models;
+    # it uses the local NuExtract model served through Ollama (see below).
     puter_auth_token: str = Field(default="")
     puter_base_url: str = Field(default="https://api.puter.com/puterai/openai/v1/")
     ai_text_model: str = Field(default="gpt-4.1")
     ai_vision_model: str = Field(default="gpt-4o")
+
+    # Local NuExtract semantic extraction via Ollama (primary text AI engine).
+    # Google Vision remains the OCR provider; NuExtract receives already-
+    # extracted TEXT and returns structured order JSON. The endpoint is the
+    # Ollama server as seen FROM THIS PROCESS: plain local runs use
+    # http://127.0.0.1:11434, while Docker containers reaching an Ollama
+    # server on the host use http://host.docker.internal:11434 (or a sibling
+    # Compose service name such as http://ollama:11434). Never expose the
+    # Ollama port publicly.
+    #
+    # Production model (verified 2026-10-02 on the Hostinger host): the
+    # official Ollama-library ``nuextract`` (3.8B, Phi-3, Q4_0, 4K context).
+    # The ``sroecker/nuextract-tiny-v1.5`` port was evaluated and rejected:
+    # at temperature 0 it deterministically enters a token-repeat loop
+    # (HTTP 500 "prediction aborted, token repeat limit reached"), and at
+    # higher temperatures it hallucinates customer PII and repeats the prompt
+    # instead of extracting. The 3.8B model extracts faithfully at
+    # temperature 0 with the official <|input|>/### Template/### Text/
+    # <|output|> prompt format and a <|end-output|> stop sequence.
+    ollama_base_url: str = Field(default="http://127.0.0.1:11434")
+    nuextract_model: str = Field(default="nuextract")
+    nuextract_timeout_seconds: float = Field(default=120.0)
+    nuextract_max_attempts: int = Field(default=3)
+    nuextract_retry_backoff_seconds: float = Field(default=1.0)
+    # Generation cap: the model repeats the filled template instead of
+    # stopping when no stop sequence fires, so output must ALWAYS be bounded.
+    # ~800 tokens cover the canonical template plus a realistic item list.
+    nuextract_num_predict: int = Field(default=800)
+    # Model context window (nuextract 3.8B: 4096). Prompt (template + order
+    # text) plus generation must fit inside one slot.
+    nuextract_num_ctx: int = Field(default=4096)
+    # Long inputs are truncated to this many characters before prompting
+    # (~8000 chars ~= 2000 tokens, leaving headroom for template+generation).
+    nuextract_max_input_chars: int = Field(default=8000)
 
     # AI gateway resilience (Phase 12). Gateway calls get a configurable
     # socket timeout and transient failures (network errors, retryable HTTP
@@ -140,11 +176,13 @@ class Settings(BaseSettings):
     authorized_staff: str = Field(default="")
     session_store_dir: str = Field(default="")
 
-    # Google Vision OCR (Phase 4). OCR extracts raw text only; the AI layer
-    # performs semantic interpretation. When disabled or unconfigured, image
-    # and scanned-PDF processing keeps the previous direct AI-vision path.
-    # If OCR fails, orders are routed to review - never auto-created.
-    enable_google_vision: bool = Field(default=False)
+    # Google Vision OCR (only OCR provider; GPT-vision direct fallback removed).
+    # OCR extracts raw text only; the semantic layer (TextParser via local
+    # NuExtract through Ollama) performs order interpretation. OCR is mandatory for images and scanned PDFs:
+    # when unconfigured or failed, processors return a flagged ocr_failed
+    # order for review - never auto-created. Enabled by default when an API
+    # key is present.
+    enable_google_vision: bool = Field(default=True)
     google_vision_api_key: str = Field(default="")
     google_vision_base_url: str = Field(default="https://vision.googleapis.com")
     google_vision_timeout_seconds: float = Field(default=30.0)

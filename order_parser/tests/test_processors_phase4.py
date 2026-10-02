@@ -116,6 +116,7 @@ def test_image_ocr_failure_never_calls_ai(store):
 
 
 def test_image_legacy_path_when_vision_disabled(store):
+    # GPT-vision fallback removed: disabled OCR now flags for review.
     legacy = FakeVisionParser()
     processor = ImageProcessor(
         parser=legacy,
@@ -124,7 +125,9 @@ def test_image_legacy_path_when_vision_disabled(store):
         attachment_store=store,
     )
     parsed = processor.process(PNG_BYTES, filename="a.png")
-    assert legacy.images_seen and parsed.order.customer.name == "Legacy"
+    assert not legacy.images_seen
+    assert parsed.ai_response["ocr_failed"] is True
+    assert parsed.ai_response["error_code"] == "OCR_UNAVAILABLE"
 
 
 def test_sniffing_rejects_renamed_payloads():
@@ -196,13 +199,16 @@ def test_scanned_pdf_ocr_failure_flagged(store):
 
 
 def test_scanned_pdf_legacy_vision_when_disabled(store):
+    # GPT-vision fallback removed: disabled OCR now flags for review.
     scanned = make_pdf(with_text=False)
     legacy = FakeVisionParser()
     processor = PDFProcessor(
         text_parser=FakeTextParser(), vision_parser=legacy, ocr_service=FakeOCR(enabled=False), attachment_store=store
     )
     parsed = processor.process(scanned)
-    assert legacy.images_seen and parsed.order.metadata.input_type == "pdf_image"
+    assert not legacy.images_seen
+    assert parsed.ai_response["ocr_failed"] is True
+    assert parsed.ai_response["error_code"] == "OCR_UNAVAILABLE"
 
 
 def test_multipage_scan_combines_pages(store):

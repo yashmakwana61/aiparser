@@ -20,7 +20,12 @@ _sleep = time.sleep
 
 
 class VisionParser:
-    """Calls Puter's AI gateway via the free /drivers/call endpoint with images
+    """DEPRECATED: GPT-vision direct image parsing.
+
+    Kept for backward compatibility / rollback only. Production image and
+    scanned-PDF flows now use Google Vision OCR exclusively
+    (``VisionOCRService`` + ``TextParser``); processors no longer call this
+    class. Calls Puter's AI gateway via the free /drivers/call endpoint with images
     (model: ai_vision_model).
 
     Images are sent as data-URL image_url parts in the standard OpenAI

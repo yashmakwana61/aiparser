@@ -1,4 +1,4 @@
-"""Manual smoke test: file -> Google Vision OCR -> Puter GPT normalization.
+"""Manual smoke test: file -> Google Vision OCR -> NuExtract normalization.
 
 Usage:
     python scripts/vision_smoke.py <image-or-pdf-path>
@@ -31,12 +31,13 @@ def status_report() -> bool:
     print("== configuration ==")
     print(f"  google vision enabled : {s.enable_google_vision}")
     print(f"  google vision api key : {'set' if s.google_vision_api_key else 'MISSING'}")
-    print(f"  puter auth token      : {'set' if s.puter_auth_token else 'MISSING'}")
-    print(f"  ai text model         : {s.ai_text_model}")
+    print(f"  ollama endpoint       : {s.ollama_base_url}")
+    print(f"  nuextract model       : {s.nuextract_model}")
     ok = (
         s.enable_google_vision
         and bool(s.google_vision_api_key)
-        and bool(s.puter_auth_token)
+        and bool(s.ollama_base_url)
+        and bool(s.nuextract_model)
     )
     if not ok:
         print("\nFix the MISSING/false entries in .env first.")
@@ -117,7 +118,7 @@ def main(argv: list[str]) -> int:
         print("  FAILED: no text extracted — try a clearer/sharper file.")
         return 1
 
-    print("\n== hop 2: normalize with GPT via Puter ==")
+    print("\n== hop 2: normalize with NuExtract via Ollama ==")
     try:
         parsed, ai_secs = normalize(raw_text)
     except Exception as exc:

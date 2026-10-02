@@ -7,7 +7,6 @@ import structlog
 
 from order_parser.ai.text_parser import TextParser
 from order_parser.ai.vision.ocr_service import OCRError, VisionOCRService
-from order_parser.ai.vision_parser import VisionParser
 from order_parser.config import get_settings
 from order_parser.core.attachment_store import AttachmentStore
 from order_parser.models import ParsedOrder
@@ -39,26 +38,28 @@ def sniff_image_mime(data: bytes, filename: str = "") -> str | None:
 
 
 class ImageProcessor:
-    """Production image flow (Phase 4):
+    """Production image flow (Google Vision OCR only):
 
     validate type -> validate size -> store original -> SHA-256 -> Google
     Vision OCR -> raw text -> AI interpretation -> OrderModel. The original
     image is always preserved and referenced by hash.
 
-    When Google Vision is not configured the previous direct AI-vision path
-    is kept unchanged. OCR failures NEVER create orders - a flagged
-    ``ocr_failed`` ParsedOrder is returned so the pipeline routes it to
-    review.
+    GPT-vision direct fallback has been removed. When Google Vision is not
+    configured (missing API key) or OCR fails, a flagged ``ocr_failed``
+    ParsedOrder is returned so the pipeline routes it to review - orders
+    are NEVER created from OCR failures.
     """
 
     def __init__(
         self,
-        parser: VisionParser | None = None,
+        parser: Any | None = None,
         ocr_service: VisionOCRService | None = None,
         text_parser: TextParser | None = None,
         attachment_store: AttachmentStore | None = None,
     ):
-        self.parser = parser or VisionParser()
+        # ``parser`` (legacy GPT VisionParser) is accepted for backward
+        # compatibility but ignored: OCR is now Google Vision only.
+        self.parser = parser
         self.text_parser = text_parser or TextParser()
         self.ocr_service = ocr_service  # lazily built default when None
         self.store = attachment_store
@@ -82,29 +83,31 @@ class ImageProcessor:
         attachment_meta["mime_type"] = mime
         ocr = self.ocr_service or VisionOCRService()
 
-        if ocr.enabled:
-            try:
-                result = ocr.extract_text(image_bytes, filename=filename, mime_type=mime)
-            except OCRError as exc:
-                logger.warning("vision.ocr_failed", filename=filename, error=str(exc))
-                return self._failed(filename, "OCR_UNAVAILABLE", str(exc), attachment_meta)
-            attachment_meta["ocr"] = result.metadata
-            text = result.text
-            if not text:
-                return self._failed(filename, "OCR_EMPTY", "no text detected in image", attachment_meta)
-            try:
-                ai_response = self.text_parser.parse(text)
-            except Exception as exc:
-                logger.warning("vision.interpretation_failed", filename=filename, error=str(exc))
-                return self._failed(filename, "AI_INTERPRETATION_FAILED", str(exc), attachment_meta)
-            ai_response["attachment"] = attachment_meta
-            order = OrderNormalizer.normalize(ai_response, source="", input_type="image")
-            return ParsedOrder(order=order, ai_response=ai_response, extracted_text=text)
-
-        ai_response = self.parser.parse([image_bytes], filename=filename)
+        if not ocr.enabled:
+            logger.warning("vision.ocr_not_configured", filename=filename)
+            return self._failed(
+                filename,
+                "OCR_UNAVAILABLE",
+                "Google Vision OCR not configured (GOOGLE_VISION_API_KEY)",
+                attachment_meta,
+            )
+        try:
+            result = ocr.extract_text(image_bytes, filename=filename, mime_type=mime)
+        except OCRError as exc:
+            logger.warning("vision.ocr_failed", filename=filename, error=str(exc))
+            return self._failed(filename, "OCR_UNAVAILABLE", str(exc), attachment_meta)
+        attachment_meta["ocr"] = result.metadata
+        text = result.text
+        if not text:
+            return self._failed(filename, "OCR_EMPTY", "no text detected in image", attachment_meta)
+        try:
+            ai_response = self.text_parser.parse(text)
+        except Exception as exc:
+            logger.warning("vision.interpretation_failed", filename=filename, error=str(exc))
+            return self._failed(filename, "AI_INTERPRETATION_FAILED", str(exc), attachment_meta)
         ai_response["attachment"] = attachment_meta
         order = OrderNormalizer.normalize(ai_response, source="", input_type="image")
-        return ParsedOrder(order=order, ai_response=ai_response)
+        return ParsedOrder(order=order, ai_response=ai_response, extracted_text=text)
 
     # ---------------------------------------------------------------- internals
 

@@ -5,6 +5,14 @@ services:
     environment:
       APP_ENV: production
       LOG_DIR: /app/logs
+      # Ollama endpoint as seen FROM INSIDE this container. When Ollama runs
+      # on the Docker host (not in Compose), host.docker.internal resolves to
+      # the host via extra_hosts below. Override in .env with OLLAMA_BASE_URL
+      # (e.g. http://ollama:11434 when Ollama runs as a sibling service).
+      # Never publish Ollama's port publicly.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # Persist jobs, audit log, uploads, idempotency DB across restarts
       - parser-logs:/app/logs

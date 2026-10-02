@@ -7,7 +7,6 @@ import structlog
 
 from order_parser.ai.text_parser import TextParser
 from order_parser.ai.vision.ocr_service import OCRError, VisionOCRService
-from order_parser.ai.vision_parser import VisionParser
 from order_parser.config import get_settings
 from order_parser.core.attachment_store import AttachmentStore
 from order_parser.extractors.pdf_extractor import PDFExtractor
@@ -20,25 +19,28 @@ logger = structlog.get_logger(__name__)
 
 
 class PDFProcessor:
-    """Production PDF flow (Phase 4).
+    """Production PDF flow (Google Vision OCR only).
 
     Text PDFs go to the text parser (never OCR'd blindly). Scanned/image
     PDFs are rendered per page, OCR'd with Google Vision, combined and sent
     to the AI interpretation layer. The original PDF is preserved and
-    referenced by hash. When Google Vision is not configured the previous
-    direct AI-vision fallback is kept unchanged. OCR failures NEVER create
-    orders - a flagged ``ocr_failed`` ParsedOrder routes them to review.
+    referenced by hash. GPT-vision direct fallback has been removed: when
+    Google Vision is not configured, scanned PDFs return a flagged
+    ``ocr_failed`` ParsedOrder. OCR failures NEVER create orders - a
+    flagged ``ocr_failed`` ParsedOrder routes them to review.
     """
 
     def __init__(
         self,
         text_parser: TextParser | None = None,
-        vision_parser: VisionParser | None = None,
+        vision_parser: Any | None = None,
         ocr_service: VisionOCRService | None = None,
         attachment_store: AttachmentStore | None = None,
     ):
         self.text_parser = text_parser or TextParser()
-        self.vision_parser = vision_parser or VisionParser()
+        # ``vision_parser`` (legacy GPT VisionParser) is accepted for backward
+        # compatibility but ignored: scanned PDFs are now Google Vision only.
+        self.vision_parser = vision_parser
         self.ocr_service = ocr_service  # lazily built default when None
         self.store = attachment_store
 
@@ -72,11 +74,12 @@ class PDFProcessor:
         pages = PDFExtractor.render_pages(data)
         ocr = self.ocr_service or VisionOCRService()
         if not ocr.enabled:
-            ai_response = self.vision_parser.parse(pages, filename=filename)
-            ai_response["attachment"] = attachment_meta
-            return ParsedOrder(
-                order=OrderNormalizer.normalize(ai_response, "", "pdf_image"),
-                ai_response=ai_response,
+            logger.warning("vision.ocr_not_configured", filename=filename)
+            return self._failed(
+                filename,
+                "OCR_UNAVAILABLE",
+                "Google Vision OCR not configured (GOOGLE_VISION_API_KEY)",
+                attachment_meta,
             )
 
         page_texts: list[str] = []
