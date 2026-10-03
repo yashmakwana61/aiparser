@@ -1,11 +1,9 @@
-"""Resilience: Puter gateway retries (legacy compat), parser JSON-recovery and
-NuExtract/Ollama transport retries (production text path)."""
+"""Phase 12 hardening: Puter AI gateway retries and parser JSON-recovery."""
 from __future__ import annotations
 
 import io
 import json
 import urllib.error
-from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +11,7 @@ from order_parser.ai import puter as pu
 from order_parser.ai import text_parser as text_module
 from order_parser.ai import vision_parser as vision_module
 from order_parser.ai.puter import PuterError, puter_chat
-from order_parser.ai.text_parser import NuExtractError, TextParser, parse_order_with_nuextract
+from order_parser.ai.text_parser import TextParser
 from order_parser.ai.vision_parser import VisionParser
 from order_parser.core.metrics import REGISTRY
 
@@ -190,26 +188,13 @@ def test_empty_content_not_retried():
 # ----------------------------------------------------------------- parsers
 
 
-class NuextractSettings:
-    ollama_base_url = "http://127.0.0.1:11434"
-    nuextract_model = "nuextract"
-    nuextract_timeout_seconds = 30.0
-    nuextract_max_attempts = 3
-    nuextract_retry_backoff_seconds = 2.0
-    nuextract_num_predict = 800
-    nuextract_num_ctx = 4096
-    nuextract_max_input_chars = 8000
-    enable_circuit_breakers = False
-
-
 @pytest.mark.usefixtures("_isolate")
 def test_text_parser_recovers_from_invalid_json():
     responses = iter(["sorry, here is the order:", RAW_JSON])
     calls = {"n": 0}
 
-    def transport(model, prompt):
+    def transport(args):
         calls["n"] += 1
-        assert "Template:" in prompt and "Text:" in prompt
         return next(responses)
 
     parser = TextParser(client=transport)
@@ -223,12 +208,12 @@ def test_text_parser_recovers_from_invalid_json():
 def test_text_parser_gives_up_after_max_invalid_attempts():
     calls = {"n": 0}
 
-    def transport(model, prompt):
+    def transport(args):
         calls["n"] += 1
         return "not json at all"
 
     parser = TextParser(client=transport)
-    with pytest.raises(NuExtractError, match="NUEXTRACT_INVALID_JSON"):
+    with pytest.raises(ValueError, match="after 3 attempts"):
         parser.parse("hello")
     assert calls["n"] == 3
 
@@ -253,7 +238,7 @@ def test_vision_parser_recovers_from_truncated_json():
 def test_parser_does_not_retry_transport_errors():
     calls = {"n": 0}
 
-    def transport(model, prompt):
+    def transport(args):
         calls["n"] += 1
         raise PuterError("gateway down")
 
@@ -265,90 +250,19 @@ def test_parser_does_not_retry_transport_errors():
 
 @pytest.mark.usefixtures("_isolate")
 def test_max_attempts_one_disables_json_retry(monkeypatch):
-    class OneShot(NuextractSettings):
-        nuextract_max_attempts = 1
+    class OneShot(FakeSettings):
+        ai_text_model = "gpt-4.1"
+        ai_max_attempts = 1
 
     calls = {"n": 0}
 
-    def transport(model, prompt):
+    def transport(args):
         calls["n"] += 1
         return "garbage"
 
     monkeypatch.setattr(text_module, "get_settings", lambda: OneShot())
     parser = TextParser(client=transport)
     assert parser.max_attempts == 1
-    with pytest.raises(NuExtractError, match="NUEXTRACT_INVALID_JSON"):
+    with pytest.raises(ValueError):
         parser.parse("hello")
     assert calls["n"] == 1
-
-
-# ------------------------------------------------- nuextract ollama transport
-
-
-@pytest.mark.usefixtures("_isolate")
-def test_nuextract_transient_connection_error_retried_then_succeeds(monkeypatch, sleeps):
-    monkeypatch.setattr(text_module, "get_settings", lambda: NuextractSettings())
-    with patch("ollama.generate") as mock_generate:
-        mock_generate.side_effect = [
-            ConnectionError("refused"),
-            {"response": RAW_JSON},
-        ]
-        result = parse_order_with_nuextract("2 keyboards to ACME")
-    assert result["items"][0]["product_name"] == "Keyboard"
-    assert mock_generate.call_count == 2
-    assert (
-        REGISTRY.counter_value(
-            "nuextract_retries_total",
-            model="nuextract",
-            outcome="transient",
-        )
-        == 1
-    )
-    assert REGISTRY.counter_value("nuextract_success_total", model="nuextract") == 1
-    assert sleeps == [0.0]
-
-
-@pytest.mark.usefixtures("_isolate")
-def test_nuextract_exhaustion_raises_unavailable(monkeypatch, sleeps):
-    monkeypatch.setattr(text_module, "get_settings", lambda: NuextractSettings())
-    with patch("ollama.generate", side_effect=ConnectionError("down")) as mock_generate:
-        with pytest.raises(NuExtractError, match="NUEXTRACT_UNAVAILABLE"):
-            parse_order_with_nuextract("hello")
-    assert mock_generate.call_count == 3
-    assert REGISTRY.counter_value("nuextract_failure_total", model="nuextract") == 1
-    assert sleeps == [0.0, 2.0]
-
-
-@pytest.mark.usefixtures("_isolate")
-def test_nuextract_timeout_is_controlled(monkeypatch):
-    monkeypatch.setattr(text_module, "get_settings", lambda: NuextractSettings())
-    with patch("ollama.generate", side_effect=TimeoutError("timed out")):
-        with pytest.raises(NuExtractError, match="NUEXTRACT_TIMEOUT"):
-            parse_order_with_nuextract("hello")
-    assert REGISTRY.counter_value("nuextract_timeout_total", model="nuextract") == 3
-    assert REGISTRY.counter_value("nuextract_failure_total", model="nuextract") == 1
-
-
-@pytest.mark.usefixtures("_isolate")
-def test_nuextract_custom_endpoint_uses_explicit_client(monkeypatch):
-    class DockerSettings(NuextractSettings):
-        ollama_base_url = "http://host.docker.internal:11434"
-
-    monkeypatch.setattr(text_module, "get_settings", lambda: DockerSettings())
-    with (
-        patch("ollama.generate", side_effect=AssertionError("default client must not be used")),
-        patch("ollama.Client") as mock_client_cls,
-    ):
-        mock_client_cls.return_value.generate.return_value = {"response": RAW_JSON}
-        result = parse_order_with_nuextract("2 keyboards to ACME")
-
-    assert mock_client_cls.call_count == 1
-    assert mock_client_cls.call_args.kwargs["host"] == "http://host.docker.internal:11434"
-    generate = mock_client_cls.return_value.generate
-    assert generate.call_count == 1
-    assert generate.call_args.kwargs["model"] == "nuextract"
-    assert generate.call_args.kwargs["options"]["temperature"] == 0.0
-    assert "<|end-output|>" in generate.call_args.kwargs["options"]["stop"]
-    assert "Template:" in generate.call_args.kwargs["prompt"]
-    assert "<|output|>" in generate.call_args.kwargs["prompt"]
-    assert result["customer"]["name"] == "ACME"

@@ -14,7 +14,6 @@ httptools==0.8.0
 httpx==0.28.1
 idna==3.20
 numpy==2.5.3
-ollama==0.6.3
 openpyxl==3.1.5
 packaging==26.3
 pandas==3.0.6
