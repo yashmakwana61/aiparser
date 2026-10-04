@@ -13,6 +13,39 @@ def _job_status(job) -> str:
     return status.value if hasattr(status, "value") else str(status)
 
 
+def mark_job_completed(job_store, order_id: str, sales_order: str | None) -> bool:
+    """Flip the owning job to COMPLETED after a confirm-created sale order.
+
+    Finds the job whose stored result points at the confirmed pending
+    order. Best-effort: returns False when nothing matches.
+    """
+    if job_store is None or not order_id:
+        return False
+    try:
+        jobs = job_store.list()
+    except Exception:
+        return False
+    for job in jobs:
+        result = getattr(job, "result", None)
+        if isinstance(result, dict) and str(result.get("order_id") or "") == str(order_id):
+            try:
+                from order_parser.core.job import JobStatus
+
+                job.status = JobStatus.COMPLETED
+                job.review_required = False
+                job.error_code = None
+                if sales_order:
+                    job.odoo_order_id = sales_order
+                    job.odoo_order_name = sales_order
+                    result["sales_order"] = sales_order
+                    job.result = result
+                job_store.save(job)
+                return True
+            except Exception:
+                return False
+    return False
+
+
 def _result_status(result: dict[str, Any]) -> str | None:
     status = result.get("status")
     return str(status) if status else None
@@ -38,9 +71,11 @@ def build_case_status(job, record: dict[str, Any] | None,
     overrides = dict(record.get("overrides") or {})
 
     codes = list(result.get("resolution_blocked") or resolution.get("blocking") or [])
+    job_error = str(getattr(job, "error_code", "") or "")
     state = map_user_state(_job_status(job),
                            _result_status(result), codes,
-                           _reason_text(resolution), cancelled)
+                           _reason_text(resolution), cancelled,
+                           error_code=job_error)
     if record.get("status") == "pending" and state == UserFacingState.ACTION_REQUIRED:
         state = UserFacingState.WAITING_CONFIRMATION
 

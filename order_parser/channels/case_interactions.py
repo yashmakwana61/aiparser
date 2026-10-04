@@ -302,11 +302,14 @@ class CaseInteractions:
         return {"text": text, "keyboard": keyboard, "toast": None, "edit": True}
 
     def _confirm(self, case_id: str, actor: str) -> dict[str, Any]:
+        from order_parser.user_actions.case import mark_job_completed
+
         status = self._need_status(case_id)
         if not status.order_id:
             raise CaseNotActionable("nothing to confirm")
         result = self.pipeline.confirm_order(status.order_id, f"telegram:{actor}")
         if isinstance(result, dict) and result.get("status") == "success":
+            mark_job_completed(self.job_store, status.order_id, result.get("sales_order"))
             fresh = self.status(case_id)
             if fresh is None:
                 raise CaseNotFound(case_id)

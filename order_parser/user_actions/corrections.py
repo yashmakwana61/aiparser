@@ -291,6 +291,19 @@ class CorrectionService:
         record = ctx["record"]
         if record is not None and self.pending_store is not None:
             self.pending_store.delete(record.get("order_id", ""))
+        # Mark the job terminal-cancelled so stale buttons render CANCELLED
+        # instead of resurrecting actions for a deleted pending record.
+        try:
+            job = ctx["job"]
+            from order_parser.core.job import JobStatus
+
+            job.status = JobStatus.FAILED
+            job.review_required = False
+            job.error_code = "USER_CANCELLED"
+            job.error_message = f"cancelled by {actor}"
+            self.job_store.save(job)
+        except Exception:
+            logger.exception("corrections.cancel_mark_failed", case_id=case_id)
         self._audit(ctx, actor, "case_cancelled", {})
         return {"case_id": case_id, "cancelled": True}
 

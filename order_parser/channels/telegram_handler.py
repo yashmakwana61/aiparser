@@ -429,6 +429,10 @@ class TelegramHandler:
             if upper.startswith("CONFIRM "):
                 order_id = text.split(maxsplit=1)[1].strip()
                 result = await asyncio.to_thread(self.pipeline.confirm_order, order_id, "telegram")
+                if isinstance(result, dict) and result.get("status") == "success":
+                    from order_parser.user_actions.case import mark_job_completed
+
+                    mark_job_completed(self.job_store, order_id, result.get("sales_order"))
                 if not await self._reply_case_result(message, result):
                     await self._reply(message,format_result(result))
                 return
@@ -975,6 +979,9 @@ class TelegramHandler:
             return
         result = await asyncio.to_thread(self.pipeline.confirm_order, pending_id, "telegram")
         if result.get("status") == "success":
+            from order_parser.user_actions.case import mark_job_completed
+
+            mark_job_completed(self.job_store, pending_id, result.get("sales_order"))
             await asyncio.to_thread(
                 self.session_manager.advance, session.session_id, SessionStatus.APPROVED
             )

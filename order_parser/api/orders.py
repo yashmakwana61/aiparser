@@ -46,7 +46,13 @@ async def get_order(order_id: str, request: Request) -> dict:
 
 @router.post("/{order_id}/confirm")
 async def confirm_order(order_id: str, request: Request) -> dict:
-    return _pipeline(request).confirm_order(order_id, actor="api")
+    result = _pipeline(request).confirm_order(order_id, actor="api")
+    if isinstance(result, dict) and result.get("status") == "success":
+        from order_parser.user_actions.case import mark_job_completed
+
+        mark_job_completed(getattr(request.app.state, "job_store", None),
+                           order_id, result.get("sales_order"))
+    return result
 
 
 @router.post("/{order_id}/reject")

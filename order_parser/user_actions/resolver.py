@@ -79,8 +79,9 @@ def map_user_state(
     codes: list[str],
     reason: str = "",
     cancelled: bool = False,
+    error_code: str = "",
 ) -> UserFacingState:
-    if cancelled:
+    if cancelled or error_code == "USER_CANCELLED":
         return UserFacingState.CANCELLED
     if result_status == "success":
         return UserFacingState.COMPLETED

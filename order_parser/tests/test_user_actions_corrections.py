@@ -165,6 +165,33 @@ def test_cancel_case_deletes_pending(tmp_path):
     _seed(job_store, pending_store)
     assert service.cancel_case("ORD-20261004-000123", actor="u")["cancelled"] is True
     assert pending_store.get("pend-uuid-1") is None
+    job = job_store.get("ORD-20261004-000123")
+    assert job.error_code == "USER_CANCELLED"
+
+
+def test_cancelled_case_renders_cancelled_state(tmp_path):
+    from order_parser.user_actions.case import build_case_status
+
+    service, job_store, pending_store = _service(tmp_path)
+    _seed(job_store, pending_store)
+    service.cancel_case("ORD-20261004-000123", actor="u")
+    job = job_store.get("ORD-20261004-000123")
+    status = build_case_status(job, None, dict(job.result or {}))
+    assert status.user_state.value == "CANCELLED"
+    assert status.issues == []
+
+
+def test_mark_job_completed_flips_owning_job(tmp_path):
+    from order_parser.core.job import JobStatus
+    from order_parser.user_actions.case import mark_job_completed
+
+    service, job_store, pending_store = _service(tmp_path)
+    _seed(job_store, pending_store)
+    assert mark_job_completed(job_store, "pend-uuid-1", "SO09999") is True
+    job = job_store.get("ORD-20261004-000123")
+    assert job.status == JobStatus.COMPLETED
+    assert job.odoo_order_name == "SO09999"
+    assert mark_job_completed(job_store, "no-such-order", None) is False
 
 
 def test_duplicate_create_moves_to_confirmation(tmp_path):
