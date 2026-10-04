@@ -410,6 +410,34 @@ class TelegramHandler:
             text = (message.text or "").strip()
             command = text.lower().split(maxsplit=1)[0] if text.startswith("/") else ""
 
+            if command == "/start":
+                await self._reply(
+                    message,
+                    "👋 Welcome to the AI Order Parser.\n\n"
+                    "Send an order any time as:\n"
+                    "• typed text (customer, products, quantities)\n"
+                    "• a photo of the order\n"
+                    "• a PDF purchase order\n"
+                    "• an Excel file\n\n"
+                    "I'll create the Odoo sales order, or ask you — with buttons — "
+                    "only when something is unclear.\n\n"
+                    "Use /help to see all commands, /status to check your orders.",
+                )
+                return
+            if command == "/help":
+                await self._reply(
+                    message,
+                    "📖 Commands\n\n"
+                    "/neworder — collect multiple messages into one order\n"
+                    "/done — finish and process the collected order\n"
+                    "/status — check your latest order (or: /status ORD-…)\n"
+                    "/cancel — cancel the current collection\n\n"
+                    "Tips:\n"
+                    "• Include the customer name, product, quantity — and GSTIN if you have it.\n"
+                    "• When I ask you to pick, just tap a button; I'll continue automatically.\n"
+                    "• Reply CONFIRM <order-id> to approve a ready order.",
+                )
+                return
             if command == "/status":
                 await self._cmd_status(message, identity)
                 return

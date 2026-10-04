@@ -111,6 +111,13 @@ def _candidate(label: str, ref: int, detail: str = "") -> Candidate:
     return Candidate(label=label[:60], ref=ref, detail=detail[:80])
 
 
+def _candidate_label(name: str, candidate: dict[str, Any]) -> str:
+    city = str(candidate.get("city") or "").strip()
+    if city and city.lower() not in str(name or "").lower():
+        return f"{name} – {city}"
+    return str(name or "?")
+
+
 def _customer_candidates(validation: dict[str, Any]) -> list[dict[str, Any]]:
     customer = validation.get("customer") or {}
     candidates = customer.get("candidates") or []
@@ -201,7 +208,7 @@ def _customer_action(case_id, definition, result, validation, resolution, parsed
     customer_detail = result.get("customer_detail") or {}
     detected = str(result.get("customer") or customer_detail.get("raw_name") or "").strip()
     candidates = [
-        _candidate(str(c.get("partner_name") or c.get("name") or "?"), i,
+        _candidate(_candidate_label(str(c.get("partner_name") or c.get("name") or "?"), c), i,
                    f"match score {c.get('score')}" if c.get("score") is not None else "")
         for i, c in enumerate(_customer_candidates(validation))
     ]

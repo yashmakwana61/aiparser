@@ -378,16 +378,19 @@ class OdooClient:
 
     def get_partner(self, partner_id: int) -> dict[str, Any] | None:
         found = self.execute_kw(
-            "res.partner", "read", [[int(partner_id)], ["name", "email", "phone"]]
+            "res.partner", "read",
+            [[int(partner_id)], ["name", "email", "phone", "mobile",
+                                 "street", "street2", "city", "zip", "vat"]],
         )
         return found[0] if found else None
 
-    def search_partners(self, domain: list, limit: int = 2) -> list[dict[str, Any]]:
+    def search_partners(self, domain: list, limit: int = 2,
+                        fields: list[str] | None = None) -> list[dict[str, Any]]:
         return self.execute_kw(
             "res.partner",
             "search_read",
             [domain],
-            {"fields": ["id", "name"], "limit": limit, "order": "id asc"},
+            {"fields": fields or ["id", "name"], "limit": limit, "order": "id asc"},
         )
 
     def get_uom(self, uom_id: int) -> dict[str, Any] | None:

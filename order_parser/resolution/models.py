@@ -28,6 +28,7 @@ SESSION_CUSTOMER = "session_customer"
 STAFF_SELECTED = "staff_selected"
 EMAIL_EXACT = "email_exact"
 PHONE_EXACT = "phone_exact"
+VAT_EXACT = "vat_exact"
 ALIAS_MATCH = "alias_match"
 
 FUZZY_MATCH = "fuzzy_match"
@@ -53,6 +54,9 @@ COMPANY_DEFAULT = "company_default"
 # Authoritative for the order; never modifies Odoo master data.
 HUMAN_OVERRIDE = "human_override"
 
+# Address / GSTIN disambiguation between equally-plausible name matches.
+ADDRESS_MATCH = "address_match"
+
 # Methods that may support automatic order creation; fuzzy matches never do.
 DETERMINISTIC_METHODS = {
     SKU_EXACT,
@@ -65,7 +69,9 @@ DETERMINISTIC_METHODS = {
     STAFF_SELECTED,
     EMAIL_EXACT,
     PHONE_EXACT,
+    VAT_EXACT,
     ALIAS_MATCH,
+    ADDRESS_MATCH,
     HUMAN_OVERRIDE,
 }
 

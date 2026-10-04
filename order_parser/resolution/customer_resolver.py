@@ -6,6 +6,7 @@ from order_parser.config import get_settings
 from order_parser.models import CustomerModel
 from order_parser.resolution.alias_store import AliasStore
 from order_parser.resolution.models import (
+    ADDRESS_MATCH,
     ALIAS_MATCH,
     DEFAULT_FUZZY_CONFIDENCE_CAP,
     EMAIL_EXACT,
@@ -15,6 +16,7 @@ from order_parser.resolution.models import (
     PHONE_EXACT,
     SESSION_CUSTOMER,
     STAFF_SELECTED,
+    VAT_EXACT,
     CustomerResolution,
     ResolutionStatus,
 )
@@ -24,6 +26,29 @@ from order_parser.resolution.product_resolver import fuzzy_score
 logger = structlog.get_logger(__name__)
 
 MAX_CANDIDATES = 5
+
+# Address tiebreaker: unique winner must clear this bar AND match on zip or
+# city. Anything less stays ambiguous — the resolver never guesses.
+ADDRESS_WIN_SCORE = 70.0
+
+
+def _norm_tax_id(value: str | None) -> str:
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _address_score(customer: CustomerModel, partner: dict) -> tuple[float, bool, bool]:
+    """Score 0-100 how well the input address matches a partner record."""
+    zip_match = bool(customer.zip_code) and normalize_name(customer.zip_code) == normalize_name(
+        partner.get("zip"))
+    city_in, city_out = normalize_name(customer.city), normalize_name(partner.get("city"))
+    city_match = bool(city_in and city_out) and (city_in in city_out or city_out in city_in)
+    in_tokens = set((normalize_name(customer.address) + " " + normalize_name(customer.city)).split())
+    out_tokens = set(
+        (normalize_name(partner.get("street")) + " " + normalize_name(partner.get("street2")) + " "
+         + normalize_name(partner.get("city"))).split())
+    overlap = len(in_tokens & out_tokens) / max(1, len(in_tokens)) if in_tokens else 0.0
+    score = 40.0 * zip_match + 30.0 * city_match + 30.0 * overlap
+    return round(score, 1), bool(zip_match), bool(city_match)
 
 
 class CustomerResolver:
@@ -57,6 +82,7 @@ class CustomerResolver:
         name = (customer.name or "").strip()
         email = (customer.email or "").strip()
         phone = (customer.phone or "").strip()
+        gstin = _norm_tax_id(customer.gstin)
 
         # Levels 1-3: explicit identifiers (verified against Odoo; dead
         # references fail hard rather than silently falling through).
@@ -92,11 +118,14 @@ class CustomerResolver:
         if not getattr(self.odoo, "enabled", True):
             return self._unresolved("odoo_unavailable", name=name, email=email, phone=phone)
 
-        # Level 4/5/6: exact field lookups; >1 identical hit means ambiguous.
+        # Level 4/5/6/7: exact field lookups. A unique hit resolves
+        # immediately; multiple hits go through GSTIN/address disambiguation
+        # before falling back to ambiguous.
         for domain, method in (
             ([["name", "=ilike", name]], EXACT_NAME) if name else (None, None),
             ([["email", "=ilike", email]], EMAIL_EXACT) if email else (None, None),
             ([["phone", "=ilike", phone]], PHONE_EXACT) if phone else (None, None),
+            ([["vat", "=ilike", customer.gstin.strip()]], VAT_EXACT) if gstin else (None, None),
         ):
             if domain is None:
                 continue
@@ -114,6 +143,10 @@ class CustomerResolver:
                     partner_name=partner.get("name"),
                 )
             if len(found) > 1:
+                disambiguated = self._disambiguate(
+                    customer, found, method, reason="multiple_partners_match")
+                if disambiguated is not None:
+                    return disambiguated
                 candidates = [
                     {"partner_id": p["id"], "name": p.get("name"), "score": 100.0, "method": method}
                     for p in found[:MAX_CANDIDATES]
@@ -122,7 +155,7 @@ class CustomerResolver:
                     status=ResolutionStatus.AMBIGUOUS,
                     source="odoo",
                     reason="multiple_partners_match",
-                    candidates=candidates,
+                    candidates=self._with_cities(candidates),
                 )
 
         # Level 7: customer alias store.
@@ -157,14 +190,19 @@ class CustomerResolver:
             if scored:
                 best_score, best_partner = scored[0]
                 if len(scored) > 1 and (best_score - scored[1][0]) <= self.ambiguity_gap:
+                    close = [
+                        {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
+                        for s, p in scored[:MAX_CANDIDATES]
+                    ]
+                    disambiguated = self._disambiguate(
+                        customer, close, FUZZY_MATCH, reason="fuzzy_candidates_too_close")
+                    if disambiguated is not None:
+                        return disambiguated
                     return CustomerResolution(
                         status=ResolutionStatus.AMBIGUOUS,
                         source="odoo",
                         reason="fuzzy_candidates_too_close",
-                        candidates=[
-                            {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
-                            for s, p in scored[:MAX_CANDIDATES]
-                        ],
+                        candidates=self._with_cities(close),
                     )
                 return CustomerResolution(
                     status=ResolutionStatus.RESOLVED,
@@ -182,6 +220,92 @@ class CustomerResolver:
 
         # Level 9: exception - never create a new customer automatically.
         return self._unresolved("no_matching_customer", name=name, email=email, phone=phone)
+
+    def _disambiguate(self, customer: CustomerModel, candidates: list[dict],
+                        method: str, reason: str) -> CustomerResolution | None:
+        """Break a name tie using GSTIN, then address. None = still ambiguous.
+
+        Runs only when the input carries validation material (GSTIN or an
+        address); otherwise no extra Odoo reads happen. A unique, decisive
+        match resolves; ties and weak scores return None so the caller keeps
+        the order in human review.
+        """
+        gstin = _norm_tax_id(customer.gstin)
+        has_address = bool((customer.address or "").strip() or (customer.city or "").strip()
+                           or (customer.zip_code or "").strip())
+        if not gstin and not has_address:
+            return None
+        details: dict[int, dict] = {}
+        for candidate in candidates[:MAX_CANDIDATES]:
+            try:
+                # Search hits carry "id"; scored candidate dicts carry "partner_id".
+                partner_id = int(candidate.get("partner_id", candidate.get("id")))
+            except (TypeError, ValueError):
+                continue
+            partner = self._get_partner(partner_id)
+            if partner:
+                details[partner_id] = partner
+        if not details:
+            return None
+        if gstin:
+            hits = [pid for pid, partner in details.items()
+                    if _norm_tax_id(partner.get("vat")) == gstin]
+            if len(hits) == 1:
+                partner = details[hits[0]]
+                logger.info("customer.gstin_disambiguated", partner_id=hits[0])
+                return CustomerResolution(
+                    status=ResolutionStatus.RESOLVED,
+                    source="odoo",
+                    resolution_method=VAT_EXACT,
+                    value=partner.get("name"),
+                    confidence=100.0,
+                    reference_id=hits[0],
+                    partner_id=hits[0],
+                    partner_name=partner.get("name"),
+                    details={"disambiguated_from": method, "via": "gstin"},
+                )
+            if len(hits) > 1:
+                logger.warning("customer.gstin_shared_by_candidates", count=len(hits))
+                return None
+        if has_address:
+            scored = [
+                (_address_score(customer, partner)[0], pid, partner)
+                for pid, partner in details.items()
+            ]
+            scored.sort(key=lambda triple: (-triple[0], triple[1]))
+            best_score, best_id, best_partner = scored[0]
+            runner_up = scored[1][0] if len(scored) > 1 else -1.0
+            _, zip_match, city_match = _address_score(customer, best_partner)
+            if best_score > runner_up and best_score >= ADDRESS_WIN_SCORE and (zip_match or city_match):
+                logger.info("customer.address_disambiguated", partner_id=best_id,
+                            score=best_score, from_method=method)
+                return CustomerResolution(
+                    status=ResolutionStatus.RESOLVED,
+                    source="odoo",
+                    resolution_method=ADDRESS_MATCH,
+                    value=best_partner.get("name"),
+                    confidence=min(best_score, self.confidence_cap),
+                    reference_id=best_id,
+                    partner_id=best_id,
+                    partner_name=best_partner.get("name"),
+                    details={"disambiguated_from": method, "via": "address", "score": best_score},
+                )
+        return None
+
+    def _with_cities(self, candidates: list[dict]) -> list[dict]:
+        """Enrich ambiguous candidates with their city for pick buttons."""
+        enriched = []
+        for candidate in candidates:
+            entry = dict(candidate)
+            try:
+                partner = self._get_partner(int(candidate.get("partner_id")))
+            except (TypeError, ValueError):
+                partner = None
+            city = (partner or {}).get("city") or ""
+            if city:
+                entry["city"] = str(city)
+            enriched.append(entry)
+        return enriched
 
     def _get_partner(self, partner_id: int) -> dict | None:
         try:
