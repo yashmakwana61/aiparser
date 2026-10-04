@@ -50,6 +50,31 @@ def test_product_ambiguous_targets_item():
     assert any(a.verb == "pr" and a.candidate_ref == 1 for a in actions[0].actions)
 
 
+def test_product_fuzzy_tie_reason_targets_item_with_picks():
+    # Real-world reason string from ProductResolver fuzzy near-ties.
+    actions = build_actions(
+        "ORD-1",
+        {"resolution_blocked": ["PRODUCT_AMBIGUOUS"],
+         "items_detail": [{"product_name": "Kulcha", "quantity": 12}]},
+        {"customer": {"valid": True, "candidates": []},
+         "products": [{"product_name": "Kulcha", "valid": False,
+                       "reason": "fuzzy_candidates_too_close",
+                       "candidates": [
+                           {"product_id": 663, "name": "Golden Grain Kulcha Bread",
+                            "score": 100.0},
+                           {"product_id": 753, "name": "KULCHA BREAD (6 Pcs)",
+                            "score": 100.0}]}]},
+        {}, {})
+    assert len(actions) == 1
+    problem = actions[0].problem
+    assert problem.item_index == 0
+    assert "Kulcha" in problem.description
+    assert len(problem.candidates) == 2
+    picks = [a for a in actions[0].actions if a.verb == "pr"]
+    assert len(picks) == 2
+    assert picks[0].candidate_ref == 0 and picks[0].item_index == 0
+
+
 def test_product_unresolved_without_candidates_still_actionable():
     actions = build_actions(
         "ORD-1",

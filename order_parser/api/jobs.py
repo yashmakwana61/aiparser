@@ -169,7 +169,29 @@ async def get_job_actions(job_id: str, request: Request) -> dict[str, Any]:
     pending_store = getattr(pipeline, "pending_store", None)
     if order_id and pending_store is not None:
         record = pending_store.get(str(order_id))
-    status = build_case_status(job, record, result)
+    # Same option lists the Telegram renderer uses (best-effort).
+    uom_options: list[str] | None = None
+    tax_options: list[dict[str, Any]] | None = None
+    odoo = getattr(pipeline, "odoo", None)
+    if odoo is not None:
+        try:
+            uom_options = [str(u.get("name") or "") for u in (odoo.list_uoms(limit=20) or [])]
+            uom_options = [u for u in uom_options if u]
+        except Exception:
+            uom_options = None
+        try:
+            tax_options = [
+                {"id": t.get("id"),
+                 "label": f"{t.get('name')} ({float(t.get('amount') or 0):g}%)"
+                          if t.get("amount") is not None else str(t.get("name") or ""),
+                 "name": str(t.get("name") or "")}
+                for t in (odoo.list_sale_taxes(limit=20) or [])
+            ]
+            tax_options = [t for t in tax_options if t.get("id") is not None]
+        except Exception:
+            tax_options = None
+    status = build_case_status(job, record, result,
+                               uom_options=uom_options, tax_options=tax_options)
 
     def _jsonable(value):
         if is_dataclass(value):

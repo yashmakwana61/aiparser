@@ -240,15 +240,24 @@ def _product_action_for(code):
         items = result.get("items_detail") or []
         entries = _product_entries(validation)
         target = None
+        # Match by evidence, not reason strings: ambiguous resolutions always
+        # carry candidates; unresolved ones usually carry none.
         for index, entry in enumerate(entries):
-            reason = _entry_reason(entry)
-            ambiguous = "ambiguous" in reason
-            if code == "PRODUCT_AMBIGUOUS" and ambiguous and not entry.get("valid"):
+            if entry.get("valid"):
+                continue
+            has_candidates = bool(entry.get("candidates"))
+            if code == "PRODUCT_AMBIGUOUS" and has_candidates:
                 target = (index, entry)
                 break
-            if code == "PRODUCT_UNRESOLVED" and not ambiguous and not entry.get("valid"):
+            if code == "PRODUCT_UNRESOLVED" and not has_candidates:
                 target = (index, entry)
                 break
+        if target is None:
+            # Fall back to the first invalid line so the issue stays actionable.
+            for index, entry in enumerate(entries):
+                if not entry.get("valid"):
+                    target = (index, entry)
+                    break
         if target is None:
             return _generic_action(case_id, code, definition, context)
         index, entry = target
