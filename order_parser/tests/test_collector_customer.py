@@ -103,6 +103,8 @@ def test_collector_reroutes_to_deliver_to(tmp_path):
     resolved = resolver.resolve(_parsed("HOT CAKES PRIVATE LTD", deliver_to="ITC Sheraton Saket"))
     assert resolved.customer.status == ResolutionStatus.RESOLVED
     assert resolved.customer.partner_id == 99
+    assert resolved.customer.details.get("customer_name_effective") == "ITC Sheraton Saket"
+    assert resolved.customer.details.get("collector_rerouted_from") == "HOT CAKES PRIVATE LTD"
     assert "HOT CAKES" not in " ".join(resolver._fake.searched_names).upper()
     assert all(bi.code != COLLECTOR_AS_CUSTOMER for bi in resolved.blocking_issues)
 

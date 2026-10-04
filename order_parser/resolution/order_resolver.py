@@ -123,12 +123,20 @@ class OrderResolver:
                 fallback=fallback_name,
             )
             try:
-                return self.customers.resolve(
+                resolution = self.customers.resolve(
                     deliver,
                     session_partner_id=session_partner_id,
                     staff_partner_id=staff_partner_id,
                     explicit_reference=deliver_ref,
                 )
+                try:
+                    details = dict(resolution.details or {})
+                    details["collector_rerouted_from"] = (order.customer.name or "").strip()
+                    details["customer_name_effective"] = fallback_name
+                    resolution.details = details
+                except Exception:
+                    logger.exception("resolver.reroute_details_failed")
+                return resolution
             except Exception:
                 logger.exception("resolver.collector_fallback_failed")
         collector_name = (order.customer.name or "").strip()

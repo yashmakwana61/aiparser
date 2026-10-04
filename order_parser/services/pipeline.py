@@ -528,8 +528,11 @@ class OrderPipeline:
         customer_payload = None
         if resolved is not None:
             cust = resolved.customer
+            # Collector-rerouted orders show the effective (deliver-to)
+            # customer, not the vendor name from the customer slot.
+            effective_name = (cust.details or {}).get("customer_name_effective")
             customer_payload = {
-                "raw_name": parsed.order.customer.name,
+                "raw_name": effective_name or parsed.order.customer.name,
                 "resolved": cust.status == ResolutionStatus.RESOLVED,
                 "partner_id": cust.partner_id,
                 "partner_name": cust.partner_name,
