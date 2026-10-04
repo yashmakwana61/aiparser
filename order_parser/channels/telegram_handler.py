@@ -441,6 +441,9 @@ class TelegramHandler:
             if command == "/status":
                 await self._cmd_status(message, identity)
                 return
+            if command == "/cancel":
+                await self._cmd_cancel_global(message, identity)
+                return
 
             if self.session_manager is not None:
                 if command == "/neworder":
@@ -449,9 +452,23 @@ class TelegramHandler:
                 if command == "/done":
                     await self._cmd_done(message, identity)
                     return
-                if command == "/cancel":
-                    await self._cmd_cancel(message, identity)
-                    return
+
+            if command:
+                # Either session-less /neworder|/done or a typo: never an order.
+                if command in ("/neworder", "/done"):
+                    await self._reply(
+                        message,
+                        "This bot works in direct mode: every message is its own order, "
+                        "so /neworder and /done aren't needed.\n"
+                        "Just send the order as text, photo, PDF or Excel.",
+                    )
+                else:
+                    await self._reply(
+                        message,
+                        f"I don't recognise the command `{command}`.\n"
+                        "Send /help to see what I understand — or just send your order.",
+                    )
+                return
 
             upper = text.upper()
             if upper.startswith("CONFIRM "):
@@ -470,6 +487,20 @@ class TelegramHandler:
                 if not await self._reply_case_result(message, result):
                     await self._reply(message,format_result(result))
                 return
+
+            # A file starts a new order even mid-input: say so explicitly
+            # instead of leaving a stale trap that hijacks the next text.
+            if self.cases is not None and (message.photo or message.document) and not command:
+                try:
+                    media_key = str(getattr(message.from_user, "id", "") or "")
+                    if self.cases.awaiting.peek(media_key) is not None:
+                        self.cases.awaiting.clear(media_key)
+                        await self._reply(
+                            message,
+                            "Exited input mode — processing your file as a new order.",
+                        )
+                except Exception:
+                    logger.exception("telegram.media_awaiting_failed")
 
             # Free-text correction input for a pending case question.
             if self.cases is not None and text and not command:
@@ -665,6 +696,27 @@ class TelegramHandler:
 
         text, keyboard = case_renderer.render_status(status)
         await self._reply(message, text, reply_markup=keyboard)
+
+    async def _cmd_cancel_global(self, message, identity: StaffIdentity) -> None:
+        """One input mode at a time: cancel aborts whatever is open, and
+        never becomes an order. Priority: correction input, then session."""
+        if self.cases is not None:
+            try:
+                user_key = str(getattr(message.from_user, "id", "") or "")
+                if self.cases.awaiting.peek(user_key) is not None:
+                    self.cases.awaiting.clear(user_key)
+                    await self._reply(
+                        message,
+                        "✕ Input cancelled. Nothing was changed.\n"
+                        "Use the order buttons again if you still want to fix it.",
+                    )
+                    return
+            except Exception:
+                logger.exception("telegram.cancel_awaiting_failed")
+        if self.session_manager is not None:
+            await self._cmd_cancel(message, identity)
+            return
+        await self._reply(message, "Nothing to cancel. Send an order any time.")
 
     async def _cmd_new_order(self, message, identity: StaffIdentity) -> None:
         assert self.session_manager is not None

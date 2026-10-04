@@ -209,6 +209,67 @@ def test_status_command_shows_latest_case(tmp_path):
     assert "Action required" in joined and "ORD-" in joined
 
 
+class FakeDocFile:
+    file_name = "order.pdf"
+    mime_type = "application/pdf"
+    file_id = "doc1"
+
+    async def get_file(self):
+        return self
+
+    async def download_as_bytearray(self):
+        return bytearray(b"%PDF-fake-bytes")
+
+
+def test_cancel_aborts_awaiting_input(tmp_path):
+    handler, job_store, _ps = _handler(tmp_path)
+    _send_text(handler, "order abc")
+    job_id = job_store.list()[0].job_id
+    enter_query = FakeQuery(f"case:{job_id}:cue")
+    asyncio.run(handler.handle_callback(make_update_callback(enter_query), None))
+    jobs_before = len(job_store.list())
+    cancel_msg = FakeMessage("/cancel")
+    asyncio.run(handler.handle_update(make_update(cancel_msg), None))
+    assert any("cancelled" in r.lower() for r in cancel_msg.replies)
+    assert len(job_store.list()) == jobs_before
+    # Input mode is over: the next text starts a fresh order.
+    follow = _send_text(handler, "bread 20")
+    assert any("Action required" in r for r in follow.replies)
+
+
+def test_media_file_exits_input_mode_explicitly(tmp_path):
+    handler, job_store, _ps = _handler(tmp_path)
+    handler.pdf_processor = SimpleNamespace(
+        process=lambda data, filename="order.pdf": _parsed())
+    _send_text(handler, "order abc")
+    job_id = job_store.list()[0].job_id
+    enter_query = FakeQuery(f"case:{job_id}:cue")
+    asyncio.run(handler.handle_callback(make_update_callback(enter_query), None))
+    jobs_before = len(job_store.list())
+    media = FakeMessage("", user_id=8751097833)
+    media.message_id = 2001
+    media.document = FakeDocFile()
+    asyncio.run(handler.handle_update(make_update(media), None))
+    assert any("new order" in r.lower() for r in media.replies)
+    assert len(job_store.list()) == jobs_before + 1
+
+
+def test_unknown_command_never_becomes_an_order(tmp_path):
+    handler, job_store, _ps = _handler(tmp_path)
+    pipeline_calls_before = len(handler.pipeline.calls)
+    message = _send_text(handler, "/frobnicate")
+    assert any("help" in r.lower() for r in message.replies)
+    assert len(handler.pipeline.calls) == pipeline_calls_before
+    assert len(job_store.list()) == 0
+
+
+def test_neworder_in_direct_mode_explains_instead_of_ordering(tmp_path):
+    handler, job_store, _ps = _handler(tmp_path)
+    message = _send_text(handler, "/neworder")
+    assert any("direct mode" in r.lower() for r in message.replies)
+    assert len(job_store.list()) == 0
+
+
 def test_update_exception_never_leaks_internals(tmp_path):
     handler, _js, _ps = _handler(tmp_path)
 

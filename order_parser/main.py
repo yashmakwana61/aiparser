@@ -176,8 +176,10 @@ async def lifespan(app: FastAPI):
             .build()
         )
         telegram_app.add_handler(MessageHandler(filters.ALL, telegram_handler.handle_update))
-        if sessions_enabled:
-            telegram_app.add_handler(CallbackQueryHandler(telegram_handler.handle_callback))
+        # Callbacks (order-case buttons AND session buttons) must always be
+        # served — gating them on sessions silently kills every inline button
+        # in direct (session-less) mode.
+        telegram_app.add_handler(CallbackQueryHandler(telegram_handler.handle_callback))
         await telegram_app.initialize()
         if settings.telegram_webhook_url:
             try:
