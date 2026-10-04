@@ -146,8 +146,12 @@ class CustomerResolver:
                     partner_name=partner.get("name"),
                 )
             if len(found) > 1:
+                targeted = self._targeted_pool(customer)
+                known = {c.get("partner_id", c.get("id")) for c in found}
+                pool = list(found) + [t for t in targeted
+                                      if t.get("partner_id") not in known]
                 disambiguated = self._disambiguate(
-                    customer, found, method, reason="multiple_partners_match")
+                    customer, pool, method, reason="multiple_partners_match")
                 if disambiguated is not None:
                     return disambiguated
                 candidates = [
@@ -200,6 +204,9 @@ class CustomerResolver:
                         {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
                         for s, p in scored
                     ]
+                    for targeted in self._targeted_pool(customer):
+                        if all(t.get("partner_id") != targeted["partner_id"] for t in pool):
+                            pool.append(targeted)
                     disambiguated = self._disambiguate(
                         customer, pool, FUZZY_MATCH, reason="fuzzy_candidates_too_close")
                     if disambiguated is not None:
@@ -376,13 +383,60 @@ class CustomerResolver:
             details={"disambiguated_from": method, "via": "address", "score": score},
         )
 
-    def _with_cities(self, candidates: list[dict]) -> list[dict]:
+    def _targeted_pool(self, customer: CustomerModel) -> list[dict]:
+        """Seed candidates directly from location/ID evidence.
+
+        Name-fuzzy pools are ordered by id and capped, so a long-named unit
+        can be cut off before scoring. When the input carries a zip, city or
+        GSTIN, search those fields directly (small, selective lookups) and
+        union the hits into the disambiguation pool.
+        """
+        seen: dict[int, dict] = {}
+        wants: list[tuple[str, str]] = []
+        if _norm_tax_id(customer.gstin):
+            wants.append(("vat", customer.gstin.strip()))
+        if (customer.zip_code or "").strip():
+            wants.append(("zip", customer.zip_code.strip()))
+        if (customer.city or "").strip():
+            wants.append(("city", customer.city.strip()))
+        for field_name, value in wants:
+            try:
+                rows = self.odoo.search_partners(
+                    [[field_name, "=ilike", value]], limit=25,
+                    fields=["id", "name", "street", "street2", "city", "zip", "vat"],
+                )
+            except Exception:
+                logger.debug("customer.targeted_search_failed", field=field_name)
+                continue
+            for row in rows or []:
+                try:
+                    pid = int(row.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                seen.setdefault(pid, {"partner_id": pid, "name": row.get("name"),
+                                      "score": None, "method": "targeted_search"})
+        return list(seen.values())
         """Enrich ambiguous candidates with their city for pick buttons."""
         enriched = []
         for candidate in candidates:
             entry = dict(candidate)
             try:
                 partner = self._get_partner(int(candidate.get("partner_id")))
+            except (TypeError, ValueError):
+                partner = None
+            city = (partner or {}).get("city") or ""
+            if city:
+                entry["city"] = str(city)
+            enriched.append(entry)
+        return enriched
+
+    def _with_cities(self, candidates: list[dict]) -> list[dict]:
+        """Enrich ambiguous candidates with their city for pick buttons."""
+        enriched = []
+        for candidate in candidates:
+            entry = dict(candidate)
+            try:
+                partner = self._get_partner(int(candidate.get("partner_id", candidate.get("id"))))
             except (TypeError, ValueError):
                 partner = None
             city = (partner or {}).get("city") or ""

@@ -245,8 +245,7 @@ def test_bulk_details_fetch_single_roundtrip():
     assert bulk_calls, "expected one bulk address fetch"
 
 
-def test_true_unit_found_deep_in_fuzzy_pool():
-    # Six same-prefix siblings: fuzzy ranks decoys first, but the address
+def test_true_unit_found_deep_in_fuzzy_pool():    # Six same-prefix siblings: fuzzy ranks decoys first, but the address
     # unambiguously names the last unit.
     partners = {}
     for i in range(1, 7):
@@ -259,3 +258,47 @@ def test_true_unit_found_deep_in_fuzzy_pool():
     assert resolved.status == ResolutionStatus.RESOLVED
     assert resolved.partner_id == 6
     assert resolved.resolution_method == "address_match"
+
+
+def test_targeted_pool_finds_unit_outside_name_pool():
+    # Decoys tie on the name; the true unit shares no name token but carries
+    # the input zip/city. Targeted retrieval must still surface it.
+    partners = {
+        1: {"id": 1, "name": "Grand Hotel Alpha", "city": "Delhi",
+            "zip": "110001", "street": "Alpha Road", "vat": ""},
+        2: {"id": 2, "name": "Grand Hotel Beta", "city": "Delhi",
+            "zip": "110001", "street": "Beta Road", "vat": ""},
+        3: {"id": 3, "name": "Tauru Resort", "city": "Tauru",
+            "zip": "122105", "street": "Resort Road Tauru", "vat": ""},
+    }
+
+    class FieldedOdoo(FakeOdoo):
+        def search_partners(self, domain, limit=2, fields=None):
+            rows = super().search_partners(domain, limit)
+            if not fields:
+                return rows
+            full = {p["id"]: p for p in self._partners.values()}
+            return [{k: full[r["id"]].get(k) for k in fields if k in full[r["id"]]}
+                    for r in rows]
+
+    resolver = _resolver(FieldedOdoo(partners))
+    resolved = resolver.resolve(_customer("Grand Hotel", city="Tauru",
+                                          zip_code="122105", address="Resort Road Tauru"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 3
+    assert resolved.resolution_method == "address_match"
+
+
+def test_targeted_search_degrades_quietly_without_field_support():
+    class NoFieldsOdoo(FakeOdoo):
+        def search_partners(self, domain, limit=2):
+            for field, _op, _value in domain:
+                if field in ("zip", "city", "vat"):
+                    raise TypeError("no field support")
+            return super().search_partners(domain, limit)
+
+    resolver = _resolver(NoFieldsOdoo(TWINS))
+    resolved = resolver.resolve(_customer("ABC Traders", city="Surat",
+                                          zip_code="395001", address="Ghod Dod Road"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 2
