@@ -250,7 +250,8 @@ class CustomerResolver:
         if gstin:
             hits = [pid for pid, partner in details.items()
                     if _norm_tax_id(partner.get("vat")) == gstin]
-            if len(hits) == 1:
+            if len(hits) == 1 and not has_address:
+                # GSTIN is the only signal: decisive for the company record.
                 partner = details[hits[0]]
                 logger.info("customer.gstin_disambiguated", partner_id=hits[0])
                 return CustomerResolution(
@@ -264,33 +265,81 @@ class CustomerResolver:
                     partner_name=partner.get("name"),
                     details={"disambiguated_from": method, "via": "gstin"},
                 )
+            if len(hits) == 1 and has_address:
+                # The GSTIN names one candidate; the address must not clearly
+                # point at a different unit — that conflict stays in review.
+                scored = {pid: _address_score(customer, partner)[0]
+                          for pid, partner in details.items()}
+                hit_score = scored[hits[0]]
+                if all(score <= hit_score for pid, score in scored.items() if pid != hits[0]):
+                    partner = details[hits[0]]
+                    logger.info("customer.gstin_address_confirmed", partner_id=hits[0])
+                    return CustomerResolution(
+                        status=ResolutionStatus.RESOLVED,
+                        source="odoo",
+                        resolution_method=VAT_EXACT,
+                        value=partner.get("name"),
+                        confidence=100.0,
+                        reference_id=hits[0],
+                        partner_id=hits[0],
+                        partner_name=partner.get("name"),
+                        details={"disambiguated_from": method, "via": "gstin+address"},
+                    )
+                logger.warning("customer.gstin_address_conflict", gstin_hit=hits[0])
+                return None
             if len(hits) > 1:
-                logger.warning("customer.gstin_shared_by_candidates", count=len(hits))
+                # A GSTIN identifies the company, not the unit: several units
+                # may share it. Narrow to the sharers, then let the address
+                # pick the unit — or stay ambiguous.
+                logger.info("customer.gstin_shared_by_candidates", count=len(hits))
+                pool = {pid: details[pid] for pid in hits}
+                winner = self._address_winner(customer, pool)
+                if winner is not None:
+                    best_id, best_partner, best_score = winner
+                    return self._resolved_address(
+                        best_id, best_partner, best_score, method)
                 return None
         if has_address:
-            scored = [
-                (_address_score(customer, partner)[0], pid, partner)
-                for pid, partner in details.items()
-            ]
-            scored.sort(key=lambda triple: (-triple[0], triple[1]))
-            best_score, best_id, best_partner = scored[0]
-            runner_up = scored[1][0] if len(scored) > 1 else -1.0
-            _, zip_match, city_match = _address_score(customer, best_partner)
-            if best_score > runner_up and best_score >= ADDRESS_WIN_SCORE and (zip_match or city_match):
-                logger.info("customer.address_disambiguated", partner_id=best_id,
-                            score=best_score, from_method=method)
-                return CustomerResolution(
-                    status=ResolutionStatus.RESOLVED,
-                    source="odoo",
-                    resolution_method=ADDRESS_MATCH,
-                    value=best_partner.get("name"),
-                    confidence=min(best_score, self.confidence_cap),
-                    reference_id=best_id,
-                    partner_id=best_id,
-                    partner_name=best_partner.get("name"),
-                    details={"disambiguated_from": method, "via": "address", "score": best_score},
-                )
+            winner = self._address_winner(customer, details)
+            if winner is not None:
+                best_id, best_partner, best_score = winner
+                return self._resolved_address(best_id, best_partner, best_score, method)
         return None
+
+    @staticmethod
+    def _address_winner(customer: CustomerModel,
+                        details: dict[int, dict]) -> tuple[int, dict, float] | None:
+        """Unique address winner strictly above the runner-up and the bar,
+        anchored on a zip or city match. None when undecidable."""
+        scored = [
+            (_address_score(customer, partner)[0], pid, partner)
+            for pid, partner in details.items()
+        ]
+        if not scored:
+            return None
+        scored.sort(key=lambda triple: (-triple[0], triple[1]))
+        best_score, best_id, best_partner = scored[0]
+        runner_up = scored[1][0] if len(scored) > 1 else -1.0
+        _, zip_match, city_match = _address_score(customer, best_partner)
+        if best_score > runner_up and best_score >= ADDRESS_WIN_SCORE and (zip_match or city_match):
+            return best_id, best_partner, best_score
+        return None
+
+    def _resolved_address(self, partner_id: int, partner: dict,
+                          score: float, method: str) -> CustomerResolution:
+        logger.info("customer.address_disambiguated", partner_id=partner_id,
+                    score=score, from_method=method)
+        return CustomerResolution(
+            status=ResolutionStatus.RESOLVED,
+            source="odoo",
+            resolution_method=ADDRESS_MATCH,
+            value=partner.get("name"),
+            confidence=min(score, self.confidence_cap),
+            reference_id=partner_id,
+            partner_id=partner_id,
+            partner_name=partner.get("name"),
+            details={"disambiguated_from": method, "via": "address", "score": score},
+        )
 
     def _with_cities(self, candidates: list[dict]) -> list[dict]:
         """Enrich ambiguous candidates with their city for pick buttons."""

@@ -117,6 +117,30 @@ def test_gstin_wins_even_when_addresses_identical():
     assert resolved.resolution_method == "vat_exact"
 
 
+def test_shared_gstin_falls_back_to_address():
+    # Sister units share one state GSTIN: the address must pick the unit.
+    twins = {
+        1: dict(TWINS[1], vat="24SHARED0001A1Z1"),
+        2: dict(TWINS[2], vat="24SHARED0001A1Z1"),
+    }
+    resolver = _resolver(FakeOdoo(twins))
+    resolved = resolver.resolve(_customer("ABC Traders", city="Surat",
+                                          zip_code="395001", address="Ghod Dod Road",
+                                          gstin="24SHARED0001A1Z1"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 2
+    assert resolved.resolution_method == "address_match"
+
+
+def test_gstin_address_conflict_stays_ambiguous():
+    # GSTIN names twin 2, but the address clearly names twin 1: refuse to guess.
+    resolver = _resolver(FakeOdoo(TWINS))
+    resolved = resolver.resolve(_customer("ABC Traders", city="Ahmedabad",
+                                          zip_code="380001", address="Ring Road Ahmedabad",
+                                          gstin="24ABCDE0002A1Z2"))
+    assert resolved.status == ResolutionStatus.AMBIGUOUS
+
+
 def test_name_only_input_stays_ambiguous():
     fake = FakeOdoo(TWINS)
     resolver = CustomerResolver(fake, aliases=None, settings=Settings())
@@ -154,6 +178,9 @@ def test_get_partner_reads_address_fields(monkeypatch):
     # Proxy receives (db, uid, password, model, method, args, kwargs).
     fields = captured["args"][5][1]
     assert {"street", "city", "zip", "vat"} <= set(fields)
+    # This Odoo build rejects non-core fields (mobile, ...) with Invalid
+    # field, which used to break every partner read.
+    assert "mobile" not in set(fields)
 
 
 def test_start_and_help_answer_globally():

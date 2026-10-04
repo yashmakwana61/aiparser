@@ -377,9 +377,12 @@ class OdooClient:
     # resolution layer can flag an exception instead of guessing.
 
     def get_partner(self, partner_id: int) -> dict[str, Any] | None:
+        # NOTE: only core res.partner fields here. This Odoo build rejects
+        # others (mobile, property_account_position, ...) with Invalid field,
+        # which would break every partner read.
         found = self.execute_kw(
             "res.partner", "read",
-            [[int(partner_id)], ["name", "email", "phone", "mobile",
+            [[int(partner_id)], ["name", "email", "phone",
                                  "street", "street2", "city", "zip", "vat"]],
         )
         return found[0] if found else None
