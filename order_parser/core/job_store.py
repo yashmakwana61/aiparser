@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -13,6 +14,8 @@ from order_parser.core.job import JobRecord, JobStatus
 from order_parser.utils import ensure_directory
 
 logger = structlog.get_logger(__name__)
+
+_JOB_ID_RE = re.compile(r"^ORD-(\d{8})-(\d+)$")
 
 
 class JobStore:
@@ -35,6 +38,55 @@ class JobStore:
     def _path(self, job_id: str) -> Path:
         safe = "".join(ch for ch in job_id if ch.isalnum() or ch in ("-", "_"))
         return self.directory / f"{safe}.json"
+
+    def next_job_id(self) -> str:
+        """Allocate the next ORD-YYYYMMDD-###### id, durable across restarts.
+
+        The per-day counter lives in ``.sequence-YYYYMMDD`` next to the job
+        files (atomic tmp+replace write under the store lock). When the
+        counter file is missing or corrupt, the sequence is re-seeded by
+        scanning existing job files — so a restart, redeploy or lost counter
+        can never reuse an id and overwrite an earlier job.
+        """
+        from datetime import datetime, timezone
+
+        date_part = datetime.now(timezone.utc).strftime("%Y%m%d")
+        with self._lock:
+            seq = self._read_sequence(date_part)
+            if seq is None:
+                seq = self._scan_max_sequence(date_part)
+                logger.warning("job_store.sequence_reseeded", date=date_part, seq=seq)
+            seq += 1
+            self._write_sequence(date_part, seq)
+            return f"ORD-{date_part}-{seq:06d}"
+
+    def _sequence_path(self, date_part: str) -> Path:
+        return self.directory / f".sequence-{date_part}"
+
+    def _read_sequence(self, date_part: str) -> int | None:
+        try:
+            value = int(self._sequence_path(date_part).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+        return value if value >= 0 else None
+
+    def _scan_max_sequence(self, date_part: str) -> int:
+        best = 0
+        for path in self.directory.glob(f"ORD-{date_part}-*.json"):
+            match = _JOB_ID_RE.match(path.stem)
+            if match is None or match.group(1) != date_part:
+                continue
+            try:
+                best = max(best, int(match.group(2)))
+            except ValueError:
+                continue
+        return best
+
+    def _write_sequence(self, date_part: str, seq: int) -> None:
+        path = self._sequence_path(date_part)
+        tmp = path.with_name(f".{path.name}.tmp-{uuid.uuid4().hex[:6]}")
+        tmp.write_text(str(seq), encoding="utf-8")
+        tmp.replace(path)
 
     def save(self, job: JobRecord) -> None:
         data = job.model_dump()

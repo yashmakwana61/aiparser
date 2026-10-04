@@ -275,6 +275,14 @@ def run_job_sync(
         structlog.contextvars.unbind_contextvars("job_id")
 
 
+def _allocate_job_id(job_store: JobStore) -> str:
+    """Durable job id via the store; falls back to the in-memory generator."""
+    next_id = getattr(job_store, "next_job_id", None)
+    if callable(next_id):
+        return next_id()
+    return generate_job_id()
+
+
 def create_job(
     job_store: JobStore,
     source: str,
@@ -299,7 +307,7 @@ def create_job(
         return dup, dup
 
     job = JobRecord(
-        job_id=generate_job_id(),
+        job_id=_allocate_job_id(job_store),
         source=source,
         source_message_id=source_message_id,
         sender_id=sender_id,
