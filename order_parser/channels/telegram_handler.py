@@ -15,6 +15,7 @@ from order_parser.core.job import JobStatus
 from order_parser.core.job_runner import create_job as runner_create_job
 from order_parser.core.job_runner import fingerprint_telegram, hash_content, run_job_sync
 from order_parser.core.job_store import JobStore
+from order_parser.channels.case_interactions import CaseInteractions
 from order_parser.processors.detector import InputType, detect_input_type
 from order_parser.processors.excel_processor import ExcelProcessor
 from order_parser.processors.image_processor import ImageProcessor
@@ -209,6 +210,15 @@ class TelegramHandler:
         self.image_processor = ImageProcessor()
         self.pdf_processor = PDFProcessor()
         self.excel_processor = ExcelProcessor()
+        # Case UX (user actions) activates whenever jobs back the flow;
+        # legacy text replies remain for non-job (test) flows.
+        self.cases: CaseInteractions | None = None
+        if job_store is not None:
+            try:
+                self.cases = CaseInteractions(pipeline, job_store)
+            except Exception:
+                logger.exception("telegram.case_layer_unavailable")
+                self.cases = None
 
     def _run_via_job(
         self,
@@ -239,6 +249,9 @@ class TelegramHandler:
                 logger.info("telegram.duplicate_job_blocked", job_id=duplicate.job_id, source_message_id=source_message_id)
                 # Return the duplicate's result if completed
                 if duplicate.result is not None:
+                    if isinstance(duplicate.result, dict):
+                        duplicate.result.setdefault("job_id", duplicate.job_id)
+                    raw["job_id"] = duplicate.job_id
                     return duplicate.result
                 return {
                     "status": "review",
@@ -248,7 +261,11 @@ class TelegramHandler:
                 }
             # Synchronous execution via job_runner (state machine + metrics)
             # If a queue is available and running, we could enqueue; for Telegram UX we process sync so user gets immediate feedback
-            return run_job_sync(self.job_store, self.pipeline, job, parsed, raw=raw)
+            raw["job_id"] = job.job_id
+            result = run_job_sync(self.job_store, self.pipeline, job, parsed, raw=raw)
+            if isinstance(result, dict):
+                result.setdefault("job_id", job.job_id)
+            return result
         # Fallback (tests without job_store): legacy direct pipeline call
         import asyncio
 
@@ -272,6 +289,73 @@ class TelegramHandler:
             await self._with_retry(lambda: message.reply_text(text, **kwargs))
         except Exception:
             logger.exception("telegram.reply_failed", text_head=text[:80])
+
+    # ------------------------------------------------------- case UX layer
+
+    async def _reply_case_result(self, message: Any, result: dict[str, Any]) -> bool:
+        """Render a pipeline result through the case UX. False -> use legacy text."""
+        if self.cases is None or not isinstance(result, dict) or not result.get("job_id"):
+            return False
+        try:
+            text, keyboard, _toast = self.cases.render_for_result(result)
+            await self._reply(message, text, reply_markup=keyboard)
+            return True
+        except Exception:
+            logger.exception("telegram.case_render_failed", job_id=result.get("job_id"))
+            return False
+
+    async def _apply_case_outcome(self, query: Any, outcome: dict[str, Any]) -> None:
+        """Deliver a callback outcome: edit in place, falling back to a reply."""
+        text = str(outcome.get("text") or "")
+        keyboard = outcome.get("keyboard")
+        if outcome.get("edit"):
+            edit = getattr(query.message, "edit_text", None)
+            if callable(edit):
+                try:
+                    await self._with_retry(lambda: edit(text, reply_markup=keyboard))
+                    await self._send_follow_up(query, outcome)
+                    return
+                except Exception:
+                    logger.exception("telegram.case_edit_failed")
+        await self._reply(query.message, text, **({"reply_markup": keyboard} if keyboard else {}))
+        await self._send_follow_up(query, outcome)
+
+    async def _send_follow_up(self, query: Any, outcome: dict[str, Any]) -> None:
+        follow_up = outcome.get("follow_up")
+        if not isinstance(follow_up, dict):
+            return
+        try:
+            await self._reply(
+                query.message,
+                str(follow_up.get("text") or ""),
+                **({"reply_markup": follow_up.get("keyboard")} if follow_up.get("keyboard") else {}),
+            )
+        except Exception:
+            logger.exception("telegram.case_follow_up_failed")
+
+    async def _handle_case_callback(self, update: Update, query: Any) -> None:
+        from order_parser.user_actions import callbacks as case_cb
+        from order_parser.user_actions import renderer as case_renderer
+
+        identity = await self._authorize(update)
+        if identity is None:
+            return
+        parsed = case_cb.decode(query.data or "")
+        if parsed is None or self.cases is None:
+            await self._answer(query)
+            text, _keyboard = case_renderer.render_invalid()
+            await self._reply(query.message, text)
+            return
+        try:
+            outcome = self.cases.callback_action(
+                parsed, getattr(update.effective_user, "id", None))
+        except Exception:
+            logger.exception("telegram.case_callback_failed")
+            await self._answer(query, "Something went wrong. Please try again.")
+            return
+        toast = outcome.get("toast")
+        await self._answer(query, text=toast[:190] if toast else None)
+        await self._apply_case_outcome(query, outcome)
 
     async def _answer(self, query: Any, text: str | None = None, show_alert: bool = False) -> None:
         """Answer a callback query; expired/invalid queries never crash us."""
@@ -326,6 +410,10 @@ class TelegramHandler:
             text = (message.text or "").strip()
             command = text.lower().split(maxsplit=1)[0] if text.startswith("/") else ""
 
+            if command == "/status":
+                await self._cmd_status(message, identity)
+                return
+
             if self.session_manager is not None:
                 if command == "/neworder":
                     await self._cmd_new_order(message, identity)
@@ -336,21 +424,35 @@ class TelegramHandler:
                 if command == "/cancel":
                     await self._cmd_cancel(message, identity)
                     return
-                if command == "/status":
-                    await self._cmd_status(message, identity)
-                    return
 
             upper = text.upper()
             if upper.startswith("CONFIRM "):
                 order_id = text.split(maxsplit=1)[1].strip()
                 result = await asyncio.to_thread(self.pipeline.confirm_order, order_id, "telegram")
-                await self._reply(message,format_result(result))
+                if not await self._reply_case_result(message, result):
+                    await self._reply(message,format_result(result))
                 return
             if upper.startswith("REJECT "):
                 order_id = text.split(maxsplit=1)[1].strip()
                 result = await asyncio.to_thread(self.pipeline.reject_order, order_id, "telegram")
-                await self._reply(message,format_result(result))
+                if not await self._reply_case_result(message, result):
+                    await self._reply(message,format_result(result))
                 return
+
+            # Free-text correction input for a pending case question.
+            if self.cases is not None and text and not command:
+                try:
+                    user_key = str(getattr(message.from_user, "id", "") or "")
+                    outcome = self.cases.consume_text_input(user_key, text)
+                except Exception:
+                    logger.exception("telegram.case_input_failed")
+                    outcome = None
+                if outcome is not None:
+                    await self._reply(
+                        message, str(outcome.get("text") or ""),
+                        **({"reply_markup": outcome.get("keyboard")} if outcome.get("keyboard") else {}),
+                    )
+                    return
 
             if self.session_manager is not None and not command:
                 session = await asyncio.to_thread(self.session_manager.get_collecting_session, identity.staff_id)
@@ -380,7 +482,8 @@ class TelegramHandler:
                     hash_content(message.text),
                     sender_id,
                 )
-                await self._reply(message,format_result(result))
+                if not await self._reply_case_result(message, result):
+                    await self._reply(message,format_result(result))
             elif message.photo:
                 photo = message.photo[-1]
                 file = await self._with_retry(lambda: photo.get_file())
@@ -403,7 +506,8 @@ class TelegramHandler:
                     hash_content(data_bytes),
                     sender_id,
                 )
-                await self._reply(message,format_result(result))
+                if not await self._reply_case_result(message, result):
+                    await self._reply(message,format_result(result))
             elif message.document:
                 document = message.document
                 file = await self._with_retry(lambda: document.get_file())
@@ -428,16 +532,28 @@ class TelegramHandler:
                     hash_content(data_bytes),
                     sender_id,
                 )
-                await self._reply(message,format_result(result))
+                if not await self._reply_case_result(message, result):
+                    await self._reply(message,format_result(result))
         except Exception as exc:
             logger.exception("telegram.update_failed")
-            await self._reply(message,f"Processing failed: {exc}")
+            await self._reply(
+                message,
+                "Something went wrong while processing your order.\n"
+                f"Support reference: `{source_msg_id}`\n"
+                "The technical details have been recorded for support. Please try again.",
+            )
 
     # ---------------------------------------------------------------- callbacks
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
-        if query is None or self.session_manager is None:
+        if query is None:
+            return
+        # Order-case callbacks work with or without order sessions.
+        if (query.data or "").startswith("case:"):
+            await self._handle_case_callback(update, query)
+            return
+        if self.session_manager is None:
             return
         try:
             identity = await self._authorize(update)
@@ -472,20 +588,51 @@ class TelegramHandler:
                 await self._explain_review_block(target, identity, why_session_id)
             else:  # correct
                 await self._answer(query)
-                await self._reply(
-                    target,
-                    "Field-level correction arrives in a later phase. "
-                    "Use ✕ Cancel and /neworder to re-enter the order.",
-                )
+                if not await self._reply_session_case_actions(target, identity):
+                    await self._reply(
+                        target,
+                        "Field-level correction arrives in a later phase. "
+                        "Use ✕ Cancel and /neworder to re-enter the order.",
+                    )
         except Exception as exc:
             metrics.incr("telegram_callbacks_failed_total")
             logger.exception("telegram.callback_failed")
             try:
-                await query.answer(f"Action failed: {exc}", show_alert=True)
+                await query.answer("Action failed. Please try again.", show_alert=True)
             except Exception:
                 pass
 
     # ----------------------------------------------------------------- commands
+
+    async def _cmd_case_status(self, message, identity: StaffIdentity, case_id: str) -> None:
+        """Case-aware /status: works with or without an active session."""
+        if self.cases is None:
+            await self._reply(message, "Order tracking isn't available in this mode.")
+            return
+        try:
+            status = self.cases.status(case_id)
+        except Exception:
+            logger.exception("telegram.case_status_failed", case_id=case_id)
+            status = None
+        if status is None:
+            await self._reply(message, f"No order found for `{case_id}`.")
+            return
+        user_id = getattr(message.from_user, "id", None)
+        from order_parser.user_actions import callbacks as case_cb
+
+        job_sender = None
+        try:
+            ctx = self.cases.corrections.load_case(case_id)
+            job_sender = getattr(ctx["job"], "sender_id", None) if ctx else None
+        except Exception:
+            job_sender = None
+        if not case_cb.owns_case(user_id, job_sender):
+            await self._reply(message, "This order belongs to someone else.")
+            return
+        from order_parser.user_actions import renderer as case_renderer
+
+        text, keyboard = case_renderer.render_status(status)
+        await self._reply(message, text, reply_markup=keyboard)
 
     async def _cmd_new_order(self, message, identity: StaffIdentity) -> None:
         assert self.session_manager is not None
@@ -513,11 +660,46 @@ class TelegramHandler:
         await self._cancel_active(message, identity)
 
     async def _cmd_status(self, message, identity: StaffIdentity) -> None:
+        parts = (message.text or "").split(maxsplit=1)
+        if len(parts) > 1 and parts[1].strip().upper().startswith("ORD-"):
+            await self._cmd_case_status(message, identity, parts[1].strip())
+            return
+        if self.session_manager is None:
+            # Direct flow: report the user's latest order case.
+            if self.cases is not None:
+                try:
+                    user_id = getattr(message.from_user, "id", None)
+                    status = self.cases.latest_case_for_user(user_id)
+                except Exception:
+                    logger.exception("telegram.latest_case_failed")
+                    status = None
+                if status is not None:
+                    from order_parser.user_actions import renderer as case_renderer
+
+                    text, keyboard = case_renderer.render_status(status)
+                    await self._reply(message, text, reply_markup=keyboard)
+                    return
+            await self._reply(message, "No orders yet. Send an order as text, photo, PDF or Excel.")
+            return
         assert self.session_manager is not None
         session = await asyncio.to_thread(
             self.session_manager.get_latest_for_staff, identity.staff_id
         )
         if session is None:
+            # No session: fall back to the user's latest order case.
+            if self.cases is not None:
+                try:
+                    user_id = getattr(message.from_user, "id", None)
+                    status = self.cases.latest_case_for_user(user_id)
+                except Exception:
+                    logger.exception("telegram.latest_case_failed")
+                    status = None
+                if status is not None:
+                    from order_parser.user_actions import renderer as case_renderer
+
+                    text, keyboard = case_renderer.render_status(status)
+                    await self._reply(message, text, reply_markup=keyboard)
+                    return
             await self._reply(message, "No active order session. Start one with /neworder.")
             return
         await self._reply(message,
@@ -608,6 +790,16 @@ class TelegramHandler:
 
         outcome = await asyncio.to_thread(self.session_service.finalize, session)
         final = await asyncio.to_thread(self._apply_outcome, session.session_id, outcome)
+        result = outcome.get("result") if isinstance(outcome, dict) else None
+        if (
+            self.cases is not None
+            and isinstance(result, dict)
+            and (result.get("job_id") or outcome.get("job_id"))
+        ):
+            result = dict(result)
+            result.setdefault("job_id", outcome.get("job_id"))
+            if await self._reply_case_result(message, result):
+                return
         text, reply_kwargs = await asyncio.to_thread(self._outcome_reply_args, outcome, final)
         await self._reply(message, text, **reply_kwargs)
 
@@ -617,6 +809,9 @@ class TelegramHandler:
         artifacts = {
             "extracted_fragments": outcome.get("fragments", []),
         }
+        if outcome.get("job_id"):
+            # Link the backing Order Case so review/correction UX can attach.
+            artifacts["job_id"] = outcome["job_id"]
         if outcome.get("parsed") is not None:
             artifacts["combined_order"] = outcome["parsed"].order.model_dump()
         resolution_summary: dict[str, Any] = {}
@@ -678,6 +873,32 @@ class TelegramHandler:
             args = (header + body, {})
         return args
 
+    async def _reply_session_case_actions(self, target: Any, identity: StaffIdentity) -> bool:
+        """Route the legacy Correct button to live case actions when linked."""
+        if self.cases is None or self.session_manager is None:
+            return False
+        try:
+            session = await asyncio.to_thread(
+                self.session_manager.get_latest_any, identity.staff_id
+            )
+        except Exception:
+            return False
+        job_id = getattr(session, "job_id", None) if session else None
+        if not job_id:
+            return False
+        try:
+            status = self.cases.status(str(job_id))
+        except Exception:
+            logger.exception("telegram.session_case_status_failed")
+            return False
+        if status is None or not status.issues:
+            return False
+        from order_parser.user_actions import renderer as case_renderer
+
+        text, keyboard = case_renderer.render_case(status)
+        await self._reply(target, text, reply_markup=keyboard)
+        return True
+
     async def _explain_review_block(
         self, message, identity: StaffIdentity, session_id: str = ""
     ) -> None:
@@ -695,6 +916,20 @@ class TelegramHandler:
                 )
         except Exception:
             session = None
+        if session is not None and self.cases is not None:
+            linked_job = getattr(session, "job_id", None)
+            if linked_job:
+                try:
+                    status = self.cases.status(str(linked_job))
+                except Exception:
+                    logger.exception("telegram.session_case_status_failed")
+                    status = None
+                if status is not None:
+                    from order_parser.user_actions import renderer as case_renderer
+
+                    text, keyboard = case_renderer.render_case(status)
+                    await self._reply(message, text, reply_markup=keyboard)
+                    return
         error = (getattr(session, "error_state", None) or {}) if session else {}
         raw_reasons = str(error.get("message") or "").split("; ")
         reasons = [r.strip() for r in raw_reasons if r.strip()]

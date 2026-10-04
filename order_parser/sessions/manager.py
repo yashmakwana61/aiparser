@@ -90,6 +90,11 @@ class SessionManager:
                 return session
         return None
 
+    def get_latest_any(self, staff_id: str) -> StaffSession | None:
+        """Newest session regardless of status (finished orders stay fixable)."""
+        ordered = self._ordered(self.store.list_by_staff(staff_id))
+        return ordered[0] if ordered else None
+
     @staticmethod
     def _ordered(sessions: list[StaffSession]) -> list[StaffSession]:
         return sorted(sessions, key=lambda s: s.updated_at, reverse=True)

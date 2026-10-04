@@ -207,6 +207,9 @@ def run_job_sync(
 
         elapsed = int((time.monotonic() - start) * 1000)
         job.processing_time_ms = elapsed
+        if isinstance(result, dict):
+            # Order Case anchor: every result carries its job id.
+            result.setdefault("job_id", job.job_id)
         job.result = result
         job.confidence = float(result.get("confidence") or result.get("confidence", 0) or 0)
         job.customer_detected = str(result.get("customer") or "")
@@ -243,7 +246,7 @@ def run_job_sync(
                 job.error_code = "RES-001"
         else:
             job.status = JobStatus.FAILED
-            job.error_code = "SYS-001"
+            job.error_code = str(result.get("error_code") or "SYS-001")
             job.error_message = str(result.get("message") or "")[:500]
             job.review_required = False
 

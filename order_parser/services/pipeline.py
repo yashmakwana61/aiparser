@@ -638,13 +638,27 @@ class OrderPipeline:
                     "message": "Duplicate submission detected while creating; sent for review.",
                     "duplicate_of": "in-flight creation",
                 }
+            except Exception:
+                # Anything raised here comes from Odoo order creation only.
+                # Keep the user message static (no tracebacks); the code
+                # drives the TEMPORARY_FAILURE / retry UX downstream.
+                logger.exception("pipeline.odoo_create_failed", order_id=order_id)
+                return {
+                    **base,
+                    "status": "error",
+                    "error_code": "ODOO_CREATE_FAILED",
+                    "message": "Odoo order creation failed.",
+                }
             return {**base, "status": "success", "sales_order": created["name"], "mode": "auto"}
 
         record: dict[str, Any] = {
             "order_id": order_id,
             "status": "pending" if decision == "pending" else "review",
             "source": source,
+            "job_id": (raw or {}).get("job_id"),
             "input_type": order.metadata.input_type,
+            "corrections": (raw or {}).get("corrections") or [],
+            "overrides": (raw or {}).get("overrides") or {},
             "parsed_order": parsed.model_dump(),
             "validation": validation,
             "raw": raw,

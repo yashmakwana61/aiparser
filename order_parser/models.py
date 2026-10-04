@@ -27,6 +27,8 @@ class ItemModel(BaseModel):
     discount: float | None = None
     confidence: float | None = None
     notes: str | None = None
+    # Human-confirmed tax override (correction flow). None = Odoo defaults.
+    tax_ids: list[int] | None = None
 
 
 class MetadataModel(BaseModel):

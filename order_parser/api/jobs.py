@@ -59,7 +59,8 @@ def _hash_content(data: bytes | str) -> str:
 
 def _sync_process(job_store: JobStore, pipeline, job: JobRecord, parsed) -> dict[str, Any]:
     """Delegates to the single source of truth job runner."""
-    return run_job_sync(job_store, pipeline, job, parsed, raw={"text": getattr(parsed, "extracted_text", "")})
+    raw = {"text": getattr(parsed, "extracted_text", ""), "job_id": job.job_id}
+    return run_job_sync(job_store, pipeline, job, parsed, raw=raw)
 
 
 @router.post("")
@@ -149,6 +150,39 @@ async def get_job(job_id: str, request: Request) -> dict[str, Any]:
         "review_required": job.review_required,
         "result": job.result,
     }
+
+
+@router.get("/{job_id}/actions")
+async def get_job_actions(job_id: str, request: Request) -> dict[str, Any]:
+    """User-facing Order Case: state + actionable issues (channel-agnostic JSON)."""
+    from dataclasses import asdict, is_dataclass
+
+    from order_parser.user_actions.case import build_case_status
+
+    job_store, pipeline = _get_stores(request)
+    job = job_store.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    result = dict(job.result or {})
+    record = None
+    order_id = result.get("order_id")
+    pending_store = getattr(pipeline, "pending_store", None)
+    if order_id and pending_store is not None:
+        record = pending_store.get(str(order_id))
+    status = build_case_status(job, record, result)
+
+    def _jsonable(value):
+        if is_dataclass(value):
+            return {k: _jsonable(v) for k, v in asdict(value).items()}
+        if isinstance(value, list):
+            return [_jsonable(v) for v in value]
+        if isinstance(value, dict):
+            return {k: _jsonable(v) for k, v in value.items()}
+        if hasattr(value, "value"):
+            return value.value
+        return value
+
+    return {"case_id": job_id, "case": _jsonable(status)}
 
 
 @router.get("")

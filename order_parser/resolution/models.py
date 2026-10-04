@@ -49,6 +49,10 @@ PRODUCT_TAX = "product_tax"
 CUSTOMER_FISCAL_POSITION = "customer_fiscal_position"
 COMPANY_DEFAULT = "company_default"
 
+# Human-confirmed override from the correction flow (Telegram picker).
+# Authoritative for the order; never modifies Odoo master data.
+HUMAN_OVERRIDE = "human_override"
+
 # Methods that may support automatic order creation; fuzzy matches never do.
 DETERMINISTIC_METHODS = {
     SKU_EXACT,
@@ -62,6 +66,7 @@ DETERMINISTIC_METHODS = {
     EMAIL_EXACT,
     PHONE_EXACT,
     ALIAS_MATCH,
+    HUMAN_OVERRIDE,
 }
 
 # Fuzzy-only matches are capped below AUTO_CREATE_THRESHOLD so they land in the
@@ -266,6 +271,9 @@ class ResolvedOrder(BaseModel):
                 for item in self.items
             ],
             "blocking": [issue.code for issue in self.blocking_issues],
+            "blocking_detail": [
+                {"code": issue.code, "message": issue.message} for issue in self.blocking_issues
+            ],
             "warnings": [warning.code for warning in self.warnings],
             "missing_information": self.missing_information,
             "auto_eligible": self.is_auto_eligible,

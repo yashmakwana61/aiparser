@@ -123,6 +123,8 @@ class StaffSession(BaseModel):
     odoo_sale_order_name: str | None = None
     odoo_invoice_id: int | str | None = None
     error_state: dict[str, Any] | None = None
+    # Linked Order Case (job) backing this session's processed order, if any.
+    job_id: str | None = None
 
 
 def can_transition(current: SessionStatus, target: SessionStatus) -> bool:

@@ -190,6 +190,7 @@ class SessionService:
                 outcome["result"] = duplicate.result or {"status": "review", "job_id": duplicate.job_id, "duplicate_of": duplicate.job_id, "message": "Duplicate session already processed"}
                 outcome["job_id"] = duplicate.job_id
                 return outcome
+            raw["job_id"] = job.job_id
             result = run_job_sync(self.job_store, self.pipeline, job, outcome["parsed"], raw=raw)
             outcome["result"] = result
             outcome["job_id"] = job.job_id

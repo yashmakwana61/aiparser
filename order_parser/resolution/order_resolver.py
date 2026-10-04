@@ -17,6 +17,7 @@ from order_parser.resolution.models import (
     CUSTOMER_AMBIGUOUS,
     CUSTOMER_UNRESOLVED,
     DUPLICATE_ORDER,
+    HUMAN_OVERRIDE,
     PRICE_DEVIATION,
     PRICE_FALLBACK,
     PRICE_MISSING,
@@ -172,6 +173,7 @@ class OrderResolver:
         parsed: ParsedOrder,
         session_partner_id: int | None = None,
         staff_partner_id: int | None = None,
+        explicit_customer_id: int | str | None = None,
     ) -> ResolvedOrder:
         order = parsed.order
         warnings: list[BlockingIssue] = []
@@ -189,6 +191,9 @@ class OrderResolver:
             logger.exception("resolver.ai_context_unreadable")
 
         explicit_ref = ai_customer.get("id")
+        # A human pin (correction flow) always wins over the AI's reference.
+        if explicit_customer_id is not None and explicit_customer_id != "":
+            explicit_ref = explicit_customer_id
         customer_resolution: CustomerResolution | None = None
         collector_entry = self._never_customer_hit(order.customer.name)
         has_human_override = bool(
@@ -254,6 +259,18 @@ class OrderResolver:
                 TaxResolution(),
                 "tax",
             )
+            # Human-confirmed tax override (correction flow): authoritative
+            # for this order, Odoo master data untouched.
+            if item.tax_ids is not None:
+                tax_resolution = TaxResolution(
+                    status=ResolutionStatus.RESOLVED,
+                    source="human",
+                    resolution_method=HUMAN_OVERRIDE,
+                    value=[int(t) for t in item.tax_ids],
+                    confidence=100.0,
+                    tax_ids=[int(t) for t in item.tax_ids],
+                    reference_id=int(item.tax_ids[0]) if item.tax_ids else None,
+                )
 
             try:
                 quantity_effective = float(item.quantity or 0) * float(factor)

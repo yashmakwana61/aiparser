@@ -297,6 +297,10 @@ class OdooClient:
             uom_id = self.find_uom(item.uom)
             if uom_id:
                 line["product_uom"] = uom_id
+            # Human-confirmed tax override from the correction flow. When
+            # None, Odoo applies product/company defaults (unchanged legacy).
+            if item.tax_ids is not None:
+                line["tax_id"] = [(6, 0, [int(t) for t in item.tax_ids])]
             lines.append((0, 0, line))
 
         values: dict[str, Any] = {"partner_id": partner_id, "order_line": lines}
@@ -400,6 +404,34 @@ class OdooClient:
             [domain],
             {"fields": ["id", "name", "factor"], "limit": limit},
         )
+
+    def list_uoms(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Units for human pickers. Degrades to [] — pickers fall back to text entry."""
+        try:
+            rows = self.execute_kw(
+                "uom.uom", "search_read", [[]],
+                {"fields": ["id", "name"], "limit": limit, "order": "name asc"},
+            )
+            return [{"id": r.get("id"), "name": str(r.get("name") or "")} for r in rows or [] if r.get("name")]
+        except Exception:
+            logger.debug("odoo.list_uoms_failed")
+            return []
+
+    def list_sale_taxes(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Sale taxes for human pickers. Degrades to [] — pickers fall back gracefully."""
+        try:
+            rows = self.execute_kw(
+                "account.tax", "search_read",
+                [[["type_tax_use", "=", "sale"]]],
+                {"fields": ["id", "name", "amount"], "limit": limit, "order": "name asc"},
+            )
+            return [
+                {"id": r.get("id"), "name": str(r.get("name") or ""), "amount": r.get("amount")}
+                for r in rows or [] if r.get("name")
+            ]
+        except Exception:
+            logger.debug("odoo.list_sale_taxes_failed")
+            return []
 
     def get_partner_pricelist(self, partner_id: int) -> int | None:
         found = self.execute_kw(
