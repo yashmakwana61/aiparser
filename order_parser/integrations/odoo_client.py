@@ -316,7 +316,13 @@ class OdooClient:
             self.execute_kw("sale.order", "action_confirm", [[order_id]])
         except Exception:
             logger.warning("odoo.order_confirmation_failed", order_id=order_id)
-        name = self.execute_kw("sale.order", "read", [[order_id], ["name"]])[0]["name"]
+        try:
+            name = self.execute_kw("sale.order", "read", [[order_id], ["name"]])[0]["name"]
+        except Exception:
+            # The order exists at this point; never fail confirmation (and
+            # risk a retry double-creating) over a name lookup.
+            logger.warning("odoo.order_name_read_failed", order_id=order_id)
+            name = f"order-{order_id}"
         logger.info("odoo.sales_order_created", id=order_id, name=name)
         return {"id": order_id, "name": name}
 
@@ -354,16 +360,49 @@ class OdooClient:
             logger.warning("odoo.telegram_message_create_failed", order_id=order_id, error=True)
             return None
 
+    @staticmethod
+    def _coerce_file_bytes(data: Any) -> bytes | None:
+        """Recover upload bytes from a JSON-round-tripped pending record.
+
+        ``bytes`` survive in-process; after a JSON save/load they come back
+        as ``"b'...'"`` repr strings. Anything unrecoverable returns None so
+        a best-effort attachment is skipped instead of failing the order.
+        """
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+        if isinstance(data, str):
+            text = data.strip()
+            if text.startswith(("b'", 'b"')):
+                try:
+                    import ast
+
+                    value = ast.literal_eval(text)
+                except (ValueError, SyntaxError):
+                    value = None
+                if isinstance(value, (bytes, bytearray)):
+                    return bytes(value)
+        return None
+
     def upload_file_to_odoo(self, filename: str, data: bytes, res_model: str, res_id: int) -> int | None:
-        """Best-effort: upload a file as ir.attachment linked to a record."""
+        """Best-effort: upload a file as ir.attachment linked to a record.
+
+        Never raises: an unrecoverable payload is skipped with a warning so
+        attachment bookkeeping can never fail (or duplicate) an order.
+        """
         import base64
-        values: dict[str, Any] = {
-            "name": filename,
-            "res_model": res_model,
-            "res_id": res_id,
-            "datas": base64.b64encode(data).decode("ascii"),
-        }
+
         try:
+            payload = self._coerce_file_bytes(data)
+            if not payload:
+                logger.warning("odoo.attachment_skipped_unreadable",
+                               res_model=res_model, res_id=res_id, filename=filename)
+                return None
+            values: dict[str, Any] = {
+                "name": filename,
+                "res_model": res_model,
+                "res_id": res_id,
+                "datas": base64.b64encode(payload).decode("ascii"),
+            }
             att_id = self.execute_kw("ir.attachment", "create", [values])
             logger.info("odoo.attachment_created", id=att_id, res_model=res_model, res_id=res_id)
             return att_id

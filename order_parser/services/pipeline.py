@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +40,13 @@ logger = structlog.get_logger(__name__)
 
 class DuplicateCreationAttempt(Exception):
     """Raised when an idempotency claim shows another creation in flight."""
+
+
+# Serializes confirmations: the pending record is claimed (deleted) before
+# Odoo creation and restored on failure, so double taps, retries and webhook
+# redeliveries can never create the same order twice — even with the
+# idempotency history disabled.
+_confirm_lock = threading.Lock()
 
 
 class OrderPipeline:
@@ -175,6 +183,10 @@ class OrderPipeline:
             return _tagged(result)
 
     def confirm_order(self, order_id: str, actor: str = "api") -> dict[str, Any]:
+        with _confirm_lock:
+            return self._confirm_locked(order_id, actor)
+
+    def _confirm_locked(self, order_id: str, actor: str = "api") -> dict[str, Any]:
         record = self.pending_store.get(order_id)
         if not record:
             return {"status": "error", "order_id": order_id, "message": "order not found or already processed"}
@@ -203,11 +215,20 @@ class OrderPipeline:
                 }
         if record.get("status") != "pending":
             return {"status": "error", "order_id": order_id, "message": "order requires manual review and cannot be auto-confirmed"}
+        # Claim the work BEFORE touching Odoo: concurrent confirms (double
+        # taps, retries) find no record and stop instead of double-creating.
+        self.pending_store.delete(order_id)
         claimed = False
         try:
             validation = record.get("validation", {})
             if self.idempotency is not None and fingerprint:
                 if not self.idempotency.claim(fingerprint, owner=order_id):
+                    # Another worker owns creation; put the claim back so a
+                    # crash there doesn't lose the order (identical bytes).
+                    try:
+                        self.pending_store.save(record)
+                    except Exception:
+                        logger.exception("pipeline.confirm_claim_restore_failed", order_id=order_id)
                     return {"status": "error", "order_id": order_id, "message": "another confirmation is in progress"}
                 claimed = True
             try:
@@ -235,7 +256,6 @@ class OrderPipeline:
                     order_ref=created["name"],
                     source=parsed.order.metadata.source,
                 )
-            self.pending_store.delete(order_id)
             result = {
                 "status": "success",
                 "order_id": order_id,
@@ -257,6 +277,13 @@ class OrderPipeline:
             )
             return result
         except Exception as exc:
+            # Restore the claim so staff can retry; the order was NOT created
+            # (creation exceptions propagate before any sale order exists, and
+            # attachment/message side-effects are best-effort only).
+            try:
+                self.pending_store.save(record)
+            except Exception:
+                logger.exception("pipeline.confirm_claim_restore_failed", order_id=order_id)
             metrics.incr("orders_confirm_errors_total")
             logger.exception("pipeline.confirm_failed", order_id=order_id)
             return {"status": "error", "order_id": order_id, "message": str(exc)}
