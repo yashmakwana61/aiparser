@@ -83,6 +83,10 @@ def map_user_state(
 ) -> UserFacingState:
     if cancelled or error_code == "USER_CANCELLED":
         return UserFacingState.CANCELLED
+    # A completed job is the ground truth (sale order exists) even when its
+    # stored result snapshot still says pending/review from an earlier round.
+    if job_status == "COMPLETED":
+        return UserFacingState.COMPLETED
     if result_status == "success":
         return UserFacingState.COMPLETED
     if result_status == "pending":
@@ -98,8 +102,6 @@ def map_user_state(
         return UserFacingState.ACTION_REQUIRED
     if job_status == "FAILED":
         return UserFacingState.TEMPORARY_FAILURE
-    if job_status == "COMPLETED":
-        return UserFacingState.COMPLETED
     if job_status == "NEEDS_REVIEW":
         return UserFacingState.ACTION_REQUIRED
     return UserFacingState.PROCESSING

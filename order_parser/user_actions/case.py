@@ -38,6 +38,7 @@ def mark_job_completed(job_store, order_id: str, sales_order: str | None) -> boo
                     job.odoo_order_id = sales_order
                     job.odoo_order_name = sales_order
                     result["sales_order"] = sales_order
+                    result["status"] = "success"
                     job.result = result
                 job_store.save(job)
                 return True
