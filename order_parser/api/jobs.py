@@ -253,7 +253,7 @@ async def parse_endpoint(
                 source = body.get("source") or source
             except Exception:
                 pass
-        if not raw_text or not raw_text.strip():
+        if not isinstance(raw_text, str) or not raw_text.strip():
             raise HTTPException(status_code=400, detail="Provide text or file")
         content = raw_text
         parsed = TextProcessor().process(raw_text)

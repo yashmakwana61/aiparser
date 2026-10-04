@@ -16,6 +16,7 @@ from order_parser.resolution.order_resolver import OrderResolver
 
 
 PARTNERS = {
+    1: {"id": 1, "name": "HOT CAKES PRIVATE LIMITED"},
     42: {"id": 42, "name": "Existing Co"},
     99: {"id": 99, "name": "ITC Sheraton Saket"},
 }
@@ -131,6 +132,29 @@ def test_human_override_wins_over_collector_guard(tmp_path):
     resolved = resolver.resolve(_parsed("HOT CAKES PRIVATE LTD"), staff_partner_id=42)
     assert resolved.customer.status == ResolutionStatus.RESOLVED
     assert resolved.customer.partner_id == 42
+
+
+def test_explicit_collector_partner_refused(tmp_path):
+    resolver = _resolver(tmp_path)
+    resolved = resolver.resolve(_parsed("Someone"), explicit_customer_id=1)
+    assert resolved.customer.status == ResolutionStatus.UNRESOLVED
+    assert resolved.customer.reason == "collector_as_customer"
+    assert any(bi.code == "COLLECTOR_AS_CUSTOMER" for bi in resolved.blocking_issues)
+    assert resolved.customer.partner_id is None
+
+
+def test_staff_selected_collector_partner_refused(tmp_path):
+    resolver = _resolver(tmp_path)
+    resolved = resolver.resolve(_parsed("Someone"), staff_partner_id=1)
+    assert resolved.customer.status == ResolutionStatus.UNRESOLVED
+    assert any(bi.code == "COLLECTOR_AS_CUSTOMER" for bi in resolved.blocking_issues)
+
+
+def test_exact_collector_name_match_refused(tmp_path):
+    resolver = _resolver(tmp_path)
+    resolved = resolver.resolve(_parsed("HOT CAKES PRIVATE LIMITED"))
+    assert resolved.customer.status == ResolutionStatus.UNRESOLVED
+    assert resolved.customer.reason == "collector_as_customer"
 
 
 def test_ordinary_customer_unaffected(tmp_path):

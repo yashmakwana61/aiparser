@@ -223,6 +223,39 @@ class OrderResolver:
                 customer_resolution = CustomerResolution(status=ResolutionStatus.UNRESOLVED, reason="resolver_error")
         partner_id = customer_resolution.partner_id
 
+        # Absolute backstop: a resolved partner whose name matches the
+        # never-customer list is NEVER accepted — not via fuzzy match, exact
+        # match, alias, explicit reference, or staff/session selection. Such
+        # names (e.g. order-collecting vendors) are not real customers.
+        if customer_resolution.status == ResolutionStatus.RESOLVED:
+            collector_target = self._never_customer_hit(customer_resolution.partner_name or "")
+            if collector_target is not None:
+                logger.warning(
+                    "customer.collector_target_refused",
+                    partner_id=customer_resolution.partner_id,
+                    partner_name=customer_resolution.partner_name,
+                    collector_entry=collector_target,
+                )
+                customer_resolution = CustomerResolution(
+                    status=ResolutionStatus.UNRESOLVED,
+                    reason="collector_as_customer",
+                    details={
+                        "partner_id": customer_resolution.partner_id,
+                        "partner_name": customer_resolution.partner_name,
+                        "collector_entry": collector_target,
+                    },
+                )
+                blocking.append(
+                    BlockingIssue(
+                        code=COLLECTOR_AS_CUSTOMER,
+                        message=(
+                            f"'{customer_resolution.details.get('partner_name')}' is a known order "
+                            "collector/vendor and can never be the customer"
+                        ),
+                    )
+                )
+                partner_id = None
+
         if customer_resolution.status == ResolutionStatus.AMBIGUOUS:
             if not any(bi.code == COLLECTOR_AS_CUSTOMER for bi in blocking):
                 blocking.append(BlockingIssue(code=CUSTOMER_AMBIGUOUS, message="Customer match is ambiguous"))
