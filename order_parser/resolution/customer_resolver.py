@@ -118,18 +118,21 @@ class CustomerResolver:
         if not getattr(self.odoo, "enabled", True):
             return self._unresolved("odoo_unavailable", name=name, email=email, phone=phone)
 
-        # Level 4/5/6/7: exact field lookups. A unique hit resolves
+        # Level 4/5/6: exact field lookups. A unique hit resolves
         # immediately; multiple hits go through GSTIN/address disambiguation
-        # before falling back to ambiguous.
+        # before falling back to ambiguous. (GSTIN intentionally has no
+        # standalone level: one state GSTIN is often shared by sister units,
+        # so it may only narrow candidates, never pick a unit alone.)
         for domain, method in (
             ([["name", "=ilike", name]], EXACT_NAME) if name else (None, None),
             ([["email", "=ilike", email]], EMAIL_EXACT) if email else (None, None),
             ([["phone", "=ilike", phone]], PHONE_EXACT) if phone else (None, None),
-            ([["vat", "=ilike", customer.gstin.strip()]], VAT_EXACT) if gstin else (None, None),
         ):
             if domain is None:
                 continue
-            found = self._search(domain)
+            # Wider pool than the display cap: disambiguation scores across
+            # all of these, so a longer-named unit is never cut off early.
+            found = self._search(domain, limit=25)
             if len(found) == 1:
                 partner = found[0]
                 return CustomerResolution(
@@ -190,14 +193,21 @@ class CustomerResolver:
             if scored:
                 best_score, best_partner = scored[0]
                 if len(scored) > 1 and (best_score - scored[1][0]) <= self.ambiguity_gap:
+                    # Pass the whole scored pool (not just the top pair): the
+                    # true unit often ranks below shorter sibling names, and
+                    # address scoring across the pool can still find it.
+                    pool = [
+                        {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
+                        for s, p in scored
+                    ]
+                    disambiguated = self._disambiguate(
+                        customer, pool, FUZZY_MATCH, reason="fuzzy_candidates_too_close")
+                    if disambiguated is not None:
+                        return disambiguated
                     close = [
                         {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
                         for s, p in scored[:MAX_CANDIDATES]
                     ]
-                    disambiguated = self._disambiguate(
-                        customer, close, FUZZY_MATCH, reason="fuzzy_candidates_too_close")
-                    if disambiguated is not None:
-                        return disambiguated
                     return CustomerResolution(
                         status=ResolutionStatus.AMBIGUOUS,
                         source="odoo",
@@ -221,6 +231,33 @@ class CustomerResolver:
         # Level 9: exception - never create a new customer automatically.
         return self._unresolved("no_matching_customer", name=name, email=email, phone=phone)
 
+    def _fetch_details(self, ids: list[int]) -> dict[int, dict]:
+        """Partner address records in one round-trip when supported.
+
+        Falls back to per-id reads for clients/stores without field support
+        (older signatures, test fakes). Never raises: gaps simply shrink
+        the disambiguation pool.
+        """
+        unique = list(dict.fromkeys(int(i) for i in ids if i is not None))
+        if not unique:
+            return {}
+        try:
+            rows = self.odoo.search_partners(
+                [["id", "in", unique]], limit=len(unique),
+                fields=["id", "name", "street", "street2", "city", "zip", "vat"],
+            )
+            found = {int(r["id"]): dict(r) for r in rows or [] if r.get("id") is not None}
+            if len(found) == len(unique):
+                return found
+        except Exception:
+            logger.debug("customer.bulk_details_unsupported")
+        details: dict[int, dict] = {}
+        for partner_id in unique:
+            partner = self._get_partner(partner_id)
+            if partner:
+                details[partner_id] = partner
+        return details
+
     def _disambiguate(self, customer: CustomerModel, candidates: list[dict],
                         method: str, reason: str) -> CustomerResolution | None:
         """Break a name tie using GSTIN, then address. None = still ambiguous.
@@ -235,16 +272,14 @@ class CustomerResolver:
                            or (customer.zip_code or "").strip())
         if not gstin and not has_address:
             return None
-        details: dict[int, dict] = {}
-        for candidate in candidates[:MAX_CANDIDATES]:
+        ids: list[int] = []
+        for candidate in candidates[:MAX_CANDIDATES * 10]:
             try:
                 # Search hits carry "id"; scored candidate dicts carry "partner_id".
-                partner_id = int(candidate.get("partner_id", candidate.get("id")))
+                ids.append(int(candidate.get("partner_id", candidate.get("id"))))
             except (TypeError, ValueError):
                 continue
-            partner = self._get_partner(partner_id)
-            if partner:
-                details[partner_id] = partner
+        details = self._fetch_details(ids)
         if not details:
             return None
         if gstin:

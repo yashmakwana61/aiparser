@@ -37,10 +37,12 @@ class FakeOdoo:
         for partner in self._partners.values():
             ok = True
             for field, op, value in domain:
-                actual = str(partner.get(field) or "")
-                if op == "=ilike" and actual.casefold() != str(value).casefold():
+                actual = partner.get(field)
+                if op == "=ilike" and str(actual or "").casefold() != str(value).casefold():
                     ok = False
-                elif op == "ilike" and str(value).casefold() not in actual.casefold():
+                elif op == "ilike" and str(value).casefold() not in str(actual or "").casefold():
+                    ok = False
+                elif op == "in" and actual not in (value or []):
                     ok = False
             if ok:
                 results.append({"id": partner["id"], "name": partner["name"]})
@@ -63,10 +65,12 @@ def _customer(name="ITC Hotels Limited", **overrides):
 
 
 def test_gstin_breaks_name_tie_decisively():
-    resolver = _resolver()
-    resolved = resolver.resolve(_customer(gstin="06AAAH1234A1Z2"))
+    # GSTIN is unique here and there is no address to contradict it.
+    twins = {1: dict(TWINS[1]), 2: dict(TWINS[2], vat="24UNIQUE0002A1Z2")}
+    resolver = _resolver(FakeOdoo(twins))
+    resolved = resolver.resolve(_customer("ABC Traders", gstin="24UNIQUE0002A1Z2"))
     assert resolved.status == ResolutionStatus.RESOLVED
-    assert resolved.partner_id == 1127
+    assert resolved.partner_id == 2
     assert resolved.resolution_method == "vat_exact"
     assert resolved.confidence == 100.0
 
@@ -214,3 +218,44 @@ def test_start_and_help_answer_globally():
         SimpleNamespace(effective_message=help_msg, effective_user=help_msg.from_user,
                         callback_query=None), None))
     assert any("/status" in r for r in help_msg.replies)
+
+
+def test_bulk_details_fetch_single_roundtrip():
+    from order_parser.resolution.customer_resolver import CustomerResolver
+
+    calls = []
+
+    class BulkOdoo(FakeOdoo):
+        def search_partners(self, domain, limit=2, fields=None):
+            calls.append((domain, limit, fields))
+            rows = super().search_partners(domain, limit)
+            if not fields:
+                return rows
+            # Honor field projection like Odoo's search_read.
+            full = {p["id"]: p for p in self._partners.values()}
+            return [{k: full[r["id"]].get(k) for k in fields if k in full[r["id"]]}
+                    for r in rows]
+
+    resolver = CustomerResolver(BulkOdoo(TWINS), aliases=None, settings=Settings())
+    resolved = resolver.resolve(_customer("ABC Traders", city="Surat",
+                                          zip_code="395001", address="Ghod Dod Road"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 2
+    bulk_calls = [c for c in calls if c[2]]
+    assert bulk_calls, "expected one bulk address fetch"
+
+
+def test_true_unit_found_deep_in_fuzzy_pool():
+    # Six same-prefix siblings: fuzzy ranks decoys first, but the address
+    # unambiguously names the last unit.
+    partners = {}
+    for i in range(1, 7):
+        partners[i] = {"id": i, "name": f"Chain Hotels Unit {i}", "city": f"City{i}",
+                       "zip": f"10000{i}", "street": f"Road {i}", "vat": ""}
+    partners[6] = dict(partners[6], city="Saket", zip="110017", street="District Centre Saket")
+    resolver = _resolver(FakeOdoo(partners))
+    resolved = resolver.resolve(_customer("Chain Hotels", city="Saket",
+                                          zip_code="110017", address="District Centre Saket"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 6
+    assert resolved.resolution_method == "address_match"
