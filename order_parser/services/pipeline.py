@@ -13,6 +13,7 @@ from order_parser.core.audit import write_audit_entry
 from order_parser.core.idempotency_store import IdempotencyStore
 from order_parser.core.pending_store import PendingStore
 from order_parser.integrations.odoo_client import OdooClient
+from order_parser.resolution.normalization import matches_never_customer
 from order_parser.models import ParsedOrder
 from order_parser.resolution.duplicate_detector import fingerprint_order
 from order_parser.resolution.models import (
@@ -376,9 +377,16 @@ class OrderPipeline:
 
         Patches the ResolvedOrder in-place so the downstream decision engine
         sees a valid, deterministic customer and can proceed with auto-creation.
+        Known order collectors/vendors (never_customer_names) are never
+        created — that would corrupt the customer master.
         """
+        name = (parsed.order.customer.name or "").strip()
+        if name and matches_never_customer(
+            name, getattr(self.settings, "never_customer_names", "")
+        ):
+            logger.warning("pipeline.auto_create_customer_collector_skipped", order_id=order_id, name=name)
+            return
         customer_model = parsed.order.customer
-        name = (customer_model.name or "").strip()
         if not name:
             logger.warning("pipeline.auto_create_customer_no_name", order_id=order_id)
             return

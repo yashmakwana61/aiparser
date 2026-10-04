@@ -26,6 +26,17 @@ Required format:
         "email": "",
         "phone": ""
     },
+    "sender": {
+        "name": ""
+    },
+    "deliver_to": {
+        "name": "",
+        "address": "",
+        "city": "",
+        "state": "",
+        "zip_code": "",
+        "gstin": ""
+    },
     "items": [
         {
             "product_name": "",
@@ -46,6 +57,7 @@ Rules:
 - Set "ambiguous" to true for any item whose quantity or product identity is uncertain in the image.
 - List fields that are not visible in the image in "missing_fields". Never guess missing values.
 - Extract full customer details including billing/shipping address, city, state, pin/zip code, GSTIN/Tax ID, email, and phone number. These are needed to create the customer in the ERP. Use empty string for any field not found.
+- Buyer vs vendor rule (critical): "customer" is ALWAYS the buyer — the bill-to party or the "goods/services to be delivered at" party. The vendor / supplier / sender / order-collector block (e.g. the company named next to "Vendor Code", letterhead sender, or forwarder) is NEVER the customer. Put the vendor/sender name in "sender.name" and the delivery-location party (when different from the bill-to customer) in "deliver_to".
 - Normalize product names.
 - Estimate a confidence score between 0 and 100.
 - Do not return explanations.
@@ -79,6 +91,17 @@ Format:
         "email": "",
         "phone": ""
     },
+    "sender": {
+        "name": ""
+    },
+    "deliver_to": {
+        "name": "",
+        "address": "",
+        "city": "",
+        "state": "",
+        "zip_code": "",
+        "gstin": ""
+    },
     "items": [
         {
             "product_name": "",
@@ -101,6 +124,7 @@ Rules:
 - Set "ambiguous" to true for any item whose quantity, product identity or price is uncertain.
 - List fields that are absent from the input in "missing_fields" (e.g. ["customer","tax","uom"]). Never guess missing values.
 - Extract the buyer/customer details: full address (street, building, area), city, state, pin/zip code, GSTIN/Tax ID number, email, and phone. Use empty string for any field not found in the input. These are needed to create the customer in the ERP.
+- Buyer vs vendor rule (critical): "customer" is ALWAYS the buyer — the bill-to party or the "goods/services to be delivered at" party. The vendor / supplier / sender / order-collector block (e.g. the company named next to "Vendor Code", the letterhead sender, or a forwarding agent) is NEVER the customer. Put the vendor/sender name in "sender.name" and the delivery-location party (when different from the bill-to customer) in "deliver_to".
 - Correct spelling mistakes.
 - Normalize product names.
 - Do not return explanations.

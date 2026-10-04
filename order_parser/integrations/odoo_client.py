@@ -446,16 +446,26 @@ class OdooClient:
         return None
 
     def get_partner_fiscal_position(self, partner_id: int) -> int | None:
-        found = self.execute_kw(
-            "res.partner", "read", [[int(partner_id)], ["property_account_position"]]
-        )
-        if not found:
+        # Version-tolerant chain: Odoo 18 renamed the field to
+        # property_account_position_id; older versions use
+        # property_account_position. Either may be absent — a missing
+        # fiscal position is not an error, taxes simply stay unmapped.
+        for field in ("property_account_position_id", "property_account_position"):
+            try:
+                found = self.execute_kw(
+                    "res.partner", "read", [[int(partner_id)], [field]]
+                )
+            except Exception:
+                logger.debug("odoo.fiscal_position_field_unavailable", field=field)
+                continue
+            if not found:
+                return None
+            position = found[0].get(field)
+            if isinstance(position, (list, tuple)) and position:
+                return int(position[0])
+            if isinstance(position, int):
+                return position
             return None
-        position = found[0].get("property_account_position")
-        if isinstance(position, (list, tuple)) and position:
-            return int(position[0])
-        if isinstance(position, int):
-            return position
         return None
 
     def map_taxes_through_fiscal_position(
@@ -490,8 +500,11 @@ class OdooClient:
             value = self.execute_kw(
                 "ir.default", "get", ["product.template", "taxes_id"]
             )
-        except Exception:
-            logger.exception("odoo.default_taxes_lookup_failed")
+        except Exception as exc:
+            # Newer Odoo versions removed ir.default.get. Missing company
+            # default taxes is not fatal — product/customer taxes apply —
+            # so stay quiet and let callers fall back to [].
+            logger.debug("odoo.default_taxes_lookup_unavailable", error=str(exc))
             return []
         if isinstance(value, (list, tuple)):
             return [int(t) for t in value if t]

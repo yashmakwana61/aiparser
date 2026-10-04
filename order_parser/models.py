@@ -49,6 +49,11 @@ class OrderModel(BaseModel):
     customer: CustomerModel = Field(default_factory=CustomerModel)
     items: list[ItemModel] = Field(default_factory=list)
     metadata: MetadataModel = Field(default_factory=MetadataModel)
+    # Vendor / sender / order-collector party as extracted from the document.
+    # A sender is NEVER the customer; resolution reroutes to deliver_to or
+    # raises COLLECTOR_AS_CUSTOMER when the customer slot holds one.
+    sender_name: str | None = None
+    deliver_to: CustomerModel | None = None
     # Canonical extensions — all optional for backward compatibility
     order_reference: str | None = None
     order_date: str | None = None

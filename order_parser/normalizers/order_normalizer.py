@@ -72,6 +72,30 @@ class OrderNormalizer:
         billing_address = raw.get("billing_address") or None
         shipping_address = raw.get("shipping_address") or raw.get("delivery_address") or None
         currency = raw.get("currency") or None
+        # Sender (vendor/collector) and deliver-to (buyer location) parties.
+        # Accepted as a plain name string or a customer-shaped dict.
+        sender_name = None
+        sender_raw = raw.get("sender")
+        if isinstance(sender_raw, dict):
+            sender_name = str(sender_raw.get("name", "") or "").strip() or None
+        elif sender_raw:
+            sender_name = str(sender_raw).strip() or None
+        deliver_to = None
+        deliver_raw = (
+            raw.get("deliver_to") or raw.get("delivery_to") or raw.get("ship_to") or raw.get("shipto")
+        )
+        if isinstance(deliver_raw, dict) and any(deliver_raw.values()):
+            deliver_to = CustomerModel(
+                name=str(deliver_raw.get("name", "") or ""),
+                email=str(deliver_raw.get("email", "") or ""),
+                phone=str(deliver_raw.get("phone", "") or ""),
+                address=str(deliver_raw.get("address", "") or ""),
+                city=str(deliver_raw.get("city", "") or ""),
+                state=str(deliver_raw.get("state", "") or ""),
+                zip_code=str(deliver_raw.get("zip_code", "") or deliver_raw.get("zip", "") or ""),
+                gstin=str(deliver_raw.get("gstin", "") or deliver_raw.get("vat", "") or ""),
+                country=str(deliver_raw.get("country", "") or ""),
+            )
         # parser metadata when available
         parser_meta = None
         if raw.get("parser_metadata"):
@@ -86,6 +110,8 @@ class OrderNormalizer:
             customer=customer,
             items=normalized_items,
             metadata=metadata,
+            sender_name=sender_name,
+            deliver_to=deliver_to,
             order_reference=str(order_reference) if order_reference else None,
             order_date=str(order_date) if order_date else None,
             delivery_date=str(delivery_date) if delivery_date else None,

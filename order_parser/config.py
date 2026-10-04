@@ -134,6 +134,14 @@ class Settings(BaseSettings):
     # UOM/price/tax are routed to review).
     strict_resolution: bool = Field(default=False)
 
+    # Known order collectors / vendors that must NEVER resolve as the
+    # customer (comma-separated, case-insensitive contains-match). E.g. a
+    # distributor that forwards purchase orders issued by the real buyer.
+    # When the extracted customer matches, resolution reroutes to the
+    # deliver-to party when present, otherwise the order is routed to
+    # review with reason "collector_as_customer".
+    never_customer_names: str = Field(default="")
+
     # Staff order sessions (Phase 3). When enabled, staff collect multiple
     # Telegram messages/attachments into one session before a single order is
     # processed. AUTHORIZED_STAFF format: "12345:bob_ops,67890:Alice Sales".
