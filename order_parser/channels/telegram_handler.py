@@ -517,6 +517,21 @@ class TelegramHandler:
                     )
                     return
 
+            # Bare-name safety net: order-less text + open customer issue.
+            if self.cases is not None and text and not command:
+                try:
+                    safety = self.cases.maybe_safety_net(
+                        str(getattr(message.from_user, "id", "") or ""), text)
+                except Exception:
+                    logger.exception("telegram.safety_net_failed")
+                    safety = None
+                if safety is not None:
+                    await self._reply(
+                        message, str(safety.get("text") or ""),
+                        **({"reply_markup": safety.get("keyboard")} if safety.get("keyboard") else {}),
+                    )
+                    return
+
             if self.session_manager is not None and not command:
                 session = await asyncio.to_thread(self.session_manager.get_collecting_session, identity.staff_id)
                 if session is not None:

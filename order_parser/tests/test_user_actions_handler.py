@@ -270,6 +270,17 @@ def test_neworder_in_direct_mode_explains_instead_of_ordering(tmp_path):
     assert len(job_store.list()) == 0
 
 
+def test_bare_name_triggers_safety_question_not_order(tmp_path):
+    handler, job_store, _ps = _handler(tmp_path)
+    _send_text(handler, "order abc")
+    jobs_before = len(job_store.list())
+    bare = FakeMessage("Only Coffee", user_id=8751097833)
+    bare.message_id = 3001
+    asyncio.run(handler.handle_update(make_update(bare), None))
+    assert any("Is \"" in r for r in bare.replies)
+    assert len(job_store.list()) == jobs_before
+
+
 def test_update_exception_never_leaks_internals(tmp_path):
     handler, _js, _ps = _handler(tmp_path)
 

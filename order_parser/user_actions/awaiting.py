@@ -40,11 +40,13 @@ class AwaitingStore:
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.path)
 
-    def set(self, user_key: str, case_id: str, verb: str, item_index: int | None = None) -> None:
+    def set(self, user_key: str, case_id: str, verb: str, item_index: int | None = None,
+            value: str | None = None) -> None:
         with self._lock:
             data = self._prune_locked()
             data[str(user_key)] = {
                 "case_id": case_id, "verb": verb, "item_index": item_index,
+                "value": value,
                 "expires_at": time.time() + self.ttl_seconds,
             }
             self._save(data)

@@ -16,6 +16,8 @@ from order_parser.user_actions.models import (
     VERB_FIX,
     VERB_RETRY_CASE,
     VERB_REVIEW_CASE,
+    VERB_SAFETY_NO,
+    VERB_SAFETY_YES,
     VERB_STATUS_CASE,
     ActionDefinition,
     OrderCaseStatus,
@@ -180,6 +182,19 @@ def render_alias_offer(case_id: str, raw_name: str, target_name: str, kind: str)
     keyboard = [[_btn("Remember", case_id, VERB_ALIAS_ADD),
                  _btn("Not now", case_id, VERB_STATUS_CASE)]]
     _ = kind
+    return _pack(lines, keyboard)
+
+
+def render_safety_ask(case_id: str, value: str, hint: str = "") -> tuple[str, InlineKeyboardMarkup]:
+    lines = [f'Is "{_clip(value, 60)}" the customer',
+             f"for order `{case_id}`?",
+             ""]
+    if hint:
+        lines.append(_clip(hint, 160))
+        lines.append("")
+    lines.append("Tap Yes and I'll attach it — or No to send a fresh order instead.")
+    keyboard = [[_btn("Yes, use it", case_id, VERB_SAFETY_YES),
+                 _btn("No, new order", case_id, VERB_SAFETY_NO)]]
     return _pack(lines, keyboard)
 
 

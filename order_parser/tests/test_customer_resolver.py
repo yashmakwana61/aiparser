@@ -87,10 +87,20 @@ def test_duplicate_names_are_ambiguous():
 
 
 def test_fuzzy_match_is_capped_below_auto_band():
-    result = _resolver().resolve(CustomerModel(name="Existing Co."))
+    # Genuinely fuzzy (later-word typo keeps the pool token intact):
+    # normalized forms differ, so fuzzy matching handles it, capped.
+    result = _resolver().resolve(CustomerModel(name="Existing Cx"))
     assert result.status == ResolutionStatus.RESOLVED
     assert result.resolution_method == "fuzzy_match"
     assert result.confidence <= 89.0
+
+
+def test_normalized_punctuation_variant_resolves_deterministically():
+    # Trailing period is cosmetic: normalized exact wins at 99, not fuzzy.
+    result = _resolver().resolve(CustomerModel(name="Existing Co."))
+    assert result.status == ResolutionStatus.RESOLVED
+    assert result.resolution_method == "normalized_name"
+    assert result.partner_id == 42
 
 
 def test_invalid_explicit_reference_fails_hard():

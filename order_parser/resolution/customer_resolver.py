@@ -13,6 +13,7 @@ from order_parser.resolution.models import (
     EXACT_NAME,
     EXPLICIT_ID,
     FUZZY_MATCH,
+    NORMALIZED_NAME,
     PHONE_EXACT,
     SESSION_CUSTOMER,
     STAFF_SELECTED,
@@ -20,12 +21,15 @@ from order_parser.resolution.models import (
     CustomerResolution,
     ResolutionStatus,
 )
-from order_parser.resolution.normalization import normalize_name
-from order_parser.resolution.product_resolver import fuzzy_score
+from order_parser.resolution.normalization import normalize_name, normalized_variants
+from order_parser.resolution.product_resolver import normalized_fuzzy_score
 
 logger = structlog.get_logger(__name__)
 
 MAX_CANDIDATES = 5
+
+# Display-only candidates below this score are never shown as pick buttons.
+DISPLAY_CANDIDATE_CUTOFF = 50.0
 
 # Address tiebreaker: unique winner must clear this bar AND match on zip or
 # city. Anything less stays ambiguous — the resolver never guesses.
@@ -184,13 +188,56 @@ class CustomerResolver:
                     )
                 logger.warning("customer.alias_target_missing", alias_id=alias.id, target_id=alias.target_id)
 
+        # Level 7b: normalized-name exact match (case/punctuation-insensitive,
+        # e.g. "only coffee, nothing else" == "ONLY COFFEE NOTHING ELSE").
+        # Deterministic like the product path: unique hit resolves at 99.
+        if name:
+            variants = normalized_variants(name)
+            token = variants[0].split()[0] if variants and variants[0] else ""
+            pool = self._search([["name", "ilike", token]], limit=50) if token else []
+            norm_hits = []
+            for partner in pool:
+                try:
+                    partner_variants = normalized_variants(str(partner.get("name") or ""))
+                except Exception:
+                    continue
+                if any(v in partner_variants for v in variants):
+                    norm_hits.append(partner)
+            if len(norm_hits) == 1:
+                partner = norm_hits[0]
+                return CustomerResolution(
+                    status=ResolutionStatus.RESOLVED,
+                    source="odoo",
+                    resolution_method=NORMALIZED_NAME,
+                    value=partner.get("name"),
+                    confidence=99.0,
+                    reference_id=partner["id"],
+                    partner_id=partner["id"],
+                    partner_name=partner.get("name"),
+                )
+            if len(norm_hits) > 1:
+                disambiguated = self._disambiguate(
+                    customer, norm_hits, NORMALIZED_NAME, reason="multiple_partners_match")
+                if disambiguated is not None:
+                    return disambiguated
+                return CustomerResolution(
+                    status=ResolutionStatus.AMBIGUOUS,
+                    source="odoo",
+                    reason="multiple_partners_match",
+                    candidates=self._with_cities([
+                        {"partner_id": p["id"], "name": p.get("name"),
+                         "score": 99.0, "method": NORMALIZED_NAME}
+                        for p in norm_hits[:MAX_CANDIDATES]
+                    ]),
+                )
+
         # Level 8: fuzzy matching over a prefiltered candidate set.
         if name:
             token = normalize_name(name).split()[0] if normalize_name(name) else ""
             pool = self._search([["name", "ilike", token]], limit=50) if token else []
             scored: list[tuple[float, dict]] = []
             for partner in pool:
-                score = fuzzy_score(name, str(partner.get("name") or ""))
+                score = normalized_fuzzy_score(name, str(partner.get("name") or ""))
                 if score >= self.min_score:
                     scored.append((round(float(score), 1), partner))
             scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
@@ -236,7 +283,39 @@ class CustomerResolver:
                 )
 
         # Level 9: exception - never create a new customer automatically.
+        # Still attach close misses as display-only pick buttons so the user
+        # chooses instead of facing a dead end.
+        display = self._display_candidates(customer, name)
+        if display:
+            return CustomerResolution(
+                status=ResolutionStatus.UNRESOLVED,
+                reason="no_matching_customer",
+                details={"raw_name": name, "display_candidates": True},
+                candidates=self._with_cities(display),
+            )
         return self._unresolved("no_matching_customer", name=name, email=email, phone=phone)
+
+    def _display_candidates(self, customer: CustomerModel, name: str) -> list[dict]:
+        """Best-effort near misses for pick buttons (never auto-resolve)."""
+        if not name:
+            return []
+        token = normalize_name(name).split()[0] if normalize_name(name) else ""
+        if not token:
+            return []
+        pool = self._search([["name", "ilike", token]], limit=25)
+        scored: list[tuple[float, dict]] = []
+        for partner in pool:
+            try:
+                score = normalized_fuzzy_score(name, str(partner.get("name") or ""))
+            except Exception:
+                continue
+            if score >= DISPLAY_CANDIDATE_CUTOFF:
+                scored.append((round(float(score), 1), partner))
+        scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
+        return [
+            {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}
+            for s, p in scored[:MAX_CANDIDATES]
+        ]
 
     def _fetch_details(self, ids: list[int]) -> dict[int, dict]:
         """Partner address records in one round-trip when supported.

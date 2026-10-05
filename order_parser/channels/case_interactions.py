@@ -38,6 +38,8 @@ from order_parser.user_actions.models import (
     VERB_PRICE_ORDER,
     VERB_RETRY_CASE,
     VERB_REVIEW_CASE,
+    VERB_SAFETY_NO,
+    VERB_SAFETY_YES,
     VERB_STATUS_CASE,
     VERB_WHY,
     OrderCaseStatus,
@@ -185,6 +187,10 @@ class CaseInteractions:
         if verb == VERB_RETRY_CASE:
             outcome = self.corrections.reprocess(case_id, actor)
             return self._after_correction(case_id, outcome, toast="Retried")
+        if verb == VERB_SAFETY_YES:
+            return self._safety_answer(case_id, actor, accept=True)
+        if verb == VERB_SAFETY_NO:
+            return self._safety_answer(case_id, actor, accept=False)
         if verb == VERB_ALIAS_ADD:
             return self._alias(case_id, actor)
         text, keyboard = R.render_invalid()
@@ -192,8 +198,37 @@ class CaseInteractions:
 
     # ------------------------------------------------------------ text input
 
+    def maybe_safety_net(self, user_id: object, text: str) -> dict[str, Any] | None:
+        """Bare-name safety net: order-less text + open customer issue = ask.
+
+        Returns a render spec (and arms a one-shot Yes/No step), or None to
+        let the text flow into normal order processing.
+        """
+        value = (text or "").strip()
+        if not value or len(value) > 80 or value.startswith("/"):
+            return None
+        if any(ch.isdigit() for ch in value):
+            return None
+        status = self.latest_case_for_user(user_id)
+        if status is None:
+            return None
+        from order_parser.user_actions.models import UserFacingState
+
+        if status.user_state != UserFacingState.ACTION_REQUIRED:
+            return None
+        if not any(issue.problem.field == "customer" for issue in status.issues):
+            return None
+        self.awaiting.set(str(user_id), status.case_id, "safety", None, value=value)
+        text_out, keyboard = R.render_safety_ask(status.case_id, value)
+        return {"text": text_out, "keyboard": keyboard, "toast": None, "edit": False}
+
     def consume_text_input(self, user_id: object, text: str) -> dict[str, Any] | None:
         """Route a free-text message into a pending correction. None = new order."""
+        pending = self.awaiting.peek(str(user_id))
+        if pending is not None and pending.get("verb") == "safety":
+            # Safety questions are answered with Yes/No buttons only; free
+            # text falls through (it may re-arm the question below).
+            return None
         awaiting = self.awaiting.pop(str(user_id))
         if not awaiting:
             return None
@@ -266,6 +301,19 @@ class CaseInteractions:
             return None
         text, keyboard = R.render_alias_offer(case_id, raw, corrected, kind)
         return {"text": text, "keyboard": keyboard}
+
+    def _safety_answer(self, case_id: str, actor: str, accept: bool) -> dict[str, Any]:
+        entry = self.awaiting.pop(actor)
+        if not entry or entry.get("verb") != "safety" or entry.get("case_id") != case_id:
+            raise InvalidCorrection("that question has expired")
+        value = str(entry.get("value") or "").strip()
+        if not value:
+            raise InvalidCorrection("that question has expired")
+        if not accept:
+            return {"text": "Okay — send your order as a new message any time.",
+                    "keyboard": None, "toast": None, "edit": False}
+        outcome = self.corrections.apply_text(case_id, "customer", None, value, actor)
+        return self._after_correction(case_id, outcome, toast="Saved")
 
     def _alias(self, case_id: str, actor: str) -> dict[str, Any]:
         ctx = self.corrections.load_case(case_id)
