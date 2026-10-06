@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import structlog
 from rapidfuzz import fuzz
 
@@ -37,6 +39,47 @@ def normalized_fuzzy_score(query: str, choice: str) -> float:
     if not nq or not nc:
         return 0.0
     return max(fuzz.WRatio(nq, nc), fuzz.partial_ratio(nq, nc))
+
+
+# Digit/letter glue split for FMCG pack sizes: "6pcs" -> "6 pcs".
+_GLUE_SPLIT = (
+    re.compile(r"(\d)([a-zA-Z])"),
+    re.compile(r"([a-zA-Z])(\d)"),
+)
+
+
+def product_tokens(value: str | None) -> str:
+    """Product-side normalization: shared normalization plus pack-size splits.
+
+    Kept OUT of shared ``normalize_name`` on purpose: alias keys and customer
+    matching depend on the stable shared form. Only product fuzzy scoring
+    uses this.
+    """
+    text = normalize_name(value)
+    for pattern in _GLUE_SPLIT:
+        text = pattern.sub(r"\1 \2", text)
+    return " ".join(text.split())
+
+
+def product_fuzzy_score(query: str, choice: str) -> float:
+    """Pack-size-aware product similarity (0-100).
+
+    Prefers ``token_set_ratio`` (shared distinctive tokens over the whole
+    string) and falls back to the legacy WRatio/partial blend (typo
+    tolerance, e.g. "Lappy" vs "Laptop 15"). See ``score_product_pair``.
+    """
+    ts, legacy = score_product_pair(query, choice)
+    return max(ts, legacy)
+
+
+def score_product_pair(query: str, choice: str) -> tuple[float, float]:
+    """Return ``(token_set_score, legacy_score)`` for a product pair."""
+    nq, nc = product_tokens(query), product_tokens(choice)
+    if not nq or not nc:
+        return 0.0, 0.0
+    token_set = float(fuzz.token_set_ratio(nq, nc))
+    legacy = float(max(fuzz.WRatio(nq, nc), fuzz.partial_ratio(nq, nc)))
+    return token_set, legacy
 
 
 class ProductResolver:
@@ -116,14 +159,24 @@ class ProductResolver:
                 logger.warning("product.alias_target_missing", alias_id=alias.id, target_id=alias.target_id)
 
         # Level 6-8: fuzzy matching with candidate ranking and ambiguity gate.
-        scored: list[tuple[float, dict]] = []
+        # Token-set matches (shared distinctive tokens over the whole
+        # string) rank first; when nothing clears the bar that way, the
+        # legacy WRatio/partial blend preserves typo tolerance.
+        token_set_hits: list[tuple[float, dict]] = []
+        legacy_hits: list[tuple[float, dict]] = []
         for product in products:
-            score = normalized_fuzzy_score(raw, str(product.get("name") or ""))
+            name = str(product.get("name") or "")
+            token_set, legacy = score_product_pair(raw, name)
             sku = str(product.get("default_code") or "")
             if sku:
-                score = max(score, normalized_fuzzy_score(raw, sku))
-            if score >= self.min_score:
-                scored.append((round(float(score), 1), product))
+                sku_token_set, sku_legacy = score_product_pair(raw, sku)
+                token_set = max(token_set, sku_token_set)
+                legacy = max(legacy, sku_legacy)
+            if token_set >= self.min_score:
+                token_set_hits.append((round(float(token_set), 1), product))
+            elif legacy >= self.min_score:
+                legacy_hits.append((round(float(legacy), 1), product))
+        scored = token_set_hits or legacy_hits
         scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
 
         candidates = [
