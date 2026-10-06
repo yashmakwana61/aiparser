@@ -75,9 +75,27 @@ def test_product_fuzzy_tie_reason_targets_item_with_picks():
     assert picks[0].candidate_ref == 0 and picks[0].item_index == 0
 
 
-def test_product_unresolved_without_candidates_still_actionable():
+def test_repeated_product_code_yields_distinct_item_actions():
     actions = build_actions(
         "ORD-1",
+        {"resolution_blocked": ["PRODUCT_AMBIGUOUS", "PRODUCT_AMBIGUOUS"],
+         "items_detail": [{"product_name": "Alpha", "quantity": 1},
+                          {"product_name": "Beta", "quantity": 2}]},
+        {"customer": {"valid": True, "candidates": []},
+         "products": [
+             {"product_name": "Alpha", "valid": False, "reason": "x",
+              "candidates": [{"product_id": 1, "name": "Alpha A", "score": 90.0}]},
+             {"product_name": "Beta", "valid": False, "reason": "y",
+              "candidates": [{"product_id": 2, "name": "Beta B", "score": 91.0}]}]},
+        {}, {})
+    assert len(actions) == 2
+    assert [a.problem.item_index for a in actions] == [0, 1]
+    assert "Alpha" in actions[0].problem.description
+    assert "Beta" in actions[1].problem.description
+
+
+def test_product_unresolved_without_candidates_still_actionable():
+    actions = build_actions(        "ORD-1",
         {"resolution_blocked": ["PRODUCT_UNRESOLVED"],
          "items_detail": [{"product_name": "Unobtainium", "quantity": 1}]},
         _validation(products=[_product_entry("product_not_found")]),

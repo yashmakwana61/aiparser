@@ -45,15 +45,14 @@ _INFRA_REASONS = ("odoo_unavailable", "catalog_unavailable", "resolver_error")
 
 
 def _codes(result: dict[str, Any], resolution: dict[str, Any]) -> list[str]:
+    # Occurrence order mirrors the resolver's item loop, so repeated codes
+    # (e.g. two ambiguous items) must be preserved — per-occurrence
+    # attribution happens in the builders. Final action dedup (by action id
+    # + item) still collapses true duplicates.
     codes = list(result.get("resolution_blocked") or [])
     if not codes:
         codes = list(resolution.get("blocking") or [])
-    seen, ordered = set(), []
-    for code in codes:
-        if code not in seen:
-            seen.add(code)
-            ordered.append(code)
-    return ordered
+    return [str(code) for code in codes]
 
 
 def _blocking_messages(resolution: dict[str, Any]) -> dict[str, str]:
@@ -151,13 +150,17 @@ def build_actions(
     if ocr_code and ocr_code not in codes:
         codes = [ocr_code] + codes
 
+    used: dict[str, set[int]] = {}
     for code in codes:
         definition = lookup(code)
         builder = _BUILDERS.get(code)
         if builder is not None:
             action = builder(case_id, definition, result, validation, resolution, parsed_order,
-                             messages.get(code, ""), uom_options, tax_options)
+                             messages.get(code, ""), uom_options, tax_options,
+                             used.setdefault(code, set()))
             if action is not None:
+                if action.problem.item_index is not None:
+                    used[code].add(action.problem.item_index)
                 actions.append(action)
             continue
         actions.append(_generic_action(case_id, code, definition, messages.get(code, "")))
@@ -172,7 +175,9 @@ def build_actions(
     # Deduplicate identical action ids, keeping order.
     seen, unique = set(), []
     for action in actions:
-        key = action.actions[0].action_id if action.actions else action.problem.code
+        first = action.actions[0] if action.actions else None
+        key = ((first.action_id if first else action.problem.code),
+               action.problem.item_index)
         if key not in seen:
             seen.add(key)
             unique.append(action)
@@ -204,7 +209,7 @@ def _generic_action(case_id: str, code: str, definition, context: str) -> UserAc
 
 
 def _customer_action(case_id, definition, result, validation, resolution, parsed_order,
-                     context, uom_options, tax_options):
+                     context, uom_options, tax_options, used=None):
     customer_detail = result.get("customer_detail") or {}
     detected = str(result.get("customer") or customer_detail.get("raw_name") or "").strip()
     candidates = [
@@ -236,13 +241,15 @@ def _customer_action(case_id, definition, result, validation, resolution, parsed
 
 def _product_action_for(code):
     def build(case_id, definition, result, validation, resolution, parsed_order,
-              context, uom_options, tax_options):
+              context, uom_options, tax_options, used=None):
         items = result.get("items_detail") or []
         entries = _product_entries(validation)
         target = None
         # Match by evidence, not reason strings: ambiguous resolutions always
         # carry candidates; unresolved ones usually carry none.
         for index, entry in enumerate(entries):
+            if index in (used or set()):
+                continue
             if entry.get("valid"):
                 continue
             has_candidates = bool(entry.get("candidates"))
@@ -255,6 +262,8 @@ def _product_action_for(code):
         if target is None:
             # Fall back to the first invalid line so the issue stays actionable.
             for index, entry in enumerate(entries):
+                if index in (used or set()):
+                    continue
                 if not entry.get("valid"):
                     target = (index, entry)
                     break
@@ -297,11 +306,13 @@ def _product_action_for(code):
 
 
 def _uom_action(case_id, definition, result, validation, resolution, parsed_order,
-                context, uom_options, tax_options):
+                context, uom_options, tax_options, used=None):
     summary_items = resolution.get("items") or []
     readiness = result.get("items_detail_readiness") or []
     target = None
     for index, item in enumerate(summary_items):
+        if index in (used or set()):
+            continue
         if not isinstance(item, dict):
             continue
         if item.get("uom_id") in (None, "") and (item.get("uom_method") in (None, "")):
@@ -309,6 +320,8 @@ def _uom_action(case_id, definition, result, validation, resolution, parsed_orde
             break
     if target is None:
         for index, item in enumerate(readiness):
+            if index in (used or set()):
+                continue
             if isinstance(item, dict) and "uom" in (item.get("missing_fields") or []):
                 target = index
                 break
@@ -347,11 +360,13 @@ def _uom_action(case_id, definition, result, validation, resolution, parsed_orde
 
 
 def _quantity_action(case_id, definition, result, validation, resolution, parsed_order,
-                     context, uom_options, tax_options):
+                     context, uom_options, tax_options, used=None):
     summary_items = resolution.get("items") or []
     items = result.get("items_detail") or []
     target = None
     for index, item in enumerate(summary_items):
+        if index in (used or set()):
+            continue
         if not isinstance(item, dict):
             continue
         try:
@@ -384,11 +399,13 @@ def _quantity_action(case_id, definition, result, validation, resolution, parsed
 
 
 def _price_missing_action(case_id, definition, result, validation, resolution, parsed_order,
-                          context, uom_options, tax_options):
+                          context, uom_options, tax_options, used=None):
     summary_items = resolution.get("items") or []
     items = result.get("items_detail") or []
     target = None
     for index, item in enumerate(summary_items):
+        if index in (used or set()):
+            continue
         if isinstance(item, dict) and item.get("unit_price") is None and item.get("price_method") in (None, ""):
             target = index
             break
@@ -415,11 +432,13 @@ def _price_missing_action(case_id, definition, result, validation, resolution, p
 
 
 def _deviation_action(case_id, definition, result, validation, resolution, parsed_order,
-                      context, uom_options, tax_options):
+                      context, uom_options, tax_options, used=None):
     items = result.get("items_detail") or []
     summary_items = resolution.get("items") or []
     target = None
     for index, item in enumerate(summary_items):
+        if index in (used or set()):
+            continue
         if not isinstance(item, dict):
             continue
         if item.get("unit_price") is not None and index < len(items):
@@ -455,11 +474,13 @@ def _deviation_action(case_id, definition, result, validation, resolution, parse
 
 def _tax_action_for(code):
     def build(case_id, definition, result, validation, resolution, parsed_order,
-              context, uom_options, tax_options):
+              context, uom_options, tax_options, used=None):
         summary_items = resolution.get("items") or []
         items = result.get("items_detail") or []
         target = None
         for index, item in enumerate(summary_items):
+            if index in (used or set()):
+                continue
             if isinstance(item, dict) and not (item.get("tax_ids") or []):
                 target = index
                 break
@@ -494,7 +515,7 @@ def _tax_action_for(code):
 
 
 def _duplicate_action(case_id, definition, result, validation, resolution, parsed_order,
-                      context, uom_options, tax_options):
+                      context, uom_options, tax_options, used=None):
     existing = ""
     if context:
         existing = context.replace("Duplicate of recently ingested order ", "").strip()
@@ -523,7 +544,7 @@ def _duplicate_action(case_id, definition, result, validation, resolution, parse
 
 def _infra_action_for(code):
     def build(case_id, definition, result, validation, resolution, parsed_order,
-              context, uom_options, tax_options):
+              context, uom_options, tax_options, used=None):
         problem = Problem(code=code, title=definition.title, description=definition.explanation,
                           severity=definition.severity, recoverable=True)
         return UserActionRequired(
@@ -540,7 +561,7 @@ def _infra_action_for(code):
 
 def _upload_action_for(code):
     def build(case_id, definition, result, validation, resolution, parsed_order,
-              context, uom_options, tax_options):
+              context, uom_options, tax_options, used=None):
         problem = Problem(code=code, title=definition.title, description=definition.explanation,
                           severity=definition.severity, recoverable=True)
         return UserActionRequired(
