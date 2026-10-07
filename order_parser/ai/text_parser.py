@@ -25,6 +25,37 @@ logger = structlog.get_logger(__name__)
 # Test seam: monkeypatched to avoid real sleeping in unit tests.
 _sleep = time.sleep
 
+# Markers (matched against "ExceptionType: message", lowercased) identifying
+# an AI provider billing/quota refusal as opposed to a real parse failure.
+# Kept narrow on purpose: a bare status code alone is not enough, it must
+# travel with a billing/quota word.
+_QUOTA_PHRASES = (
+    "insufficient_funds",
+    "insufficient funds",
+    "no usage left",
+    "quota_exceeded",
+    "quota exceeded",
+    "out of credit",
+)
+
+
+def classify_ai_failure(exc: Exception) -> str:
+    """Map an AI gateway failure to a stable error code.
+
+    Returns ``AI_QUOTA_EXHAUSTED`` for provider billing/quota refusals
+    (e.g. HTTP 402), else ``AI_INTERPRETATION_FAILED``. Used by document
+    processors so users get an actionable message instead of a generic
+    "couldn't understand" when the real problem is an empty AI balance.
+    """
+    text = f"{type(exc).__name__}: {exc}".lower()
+    if any(phrase in text for phrase in _QUOTA_PHRASES):
+        return "AI_QUOTA_EXHAUSTED"
+    if "402" in text and any(
+        word in text for word in ("fund", "usage", "quota", "billing", "credit")
+    ):
+        return "AI_QUOTA_EXHAUSTED"
+    return "AI_INTERPRETATION_FAILED"
+
 
 class TextParser:
     """Calls Puter's AI gateway via the free /drivers/call endpoint

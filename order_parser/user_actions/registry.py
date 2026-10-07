@@ -153,6 +153,14 @@ REGISTRY: dict[str, ErrorDefinition] = {
         "Upload a clearer document, or send the order as text with customer, product and quantity.",
         kind="upload",
     ),
+    "AI_QUOTA_EXHAUSTED": _d(
+        "AI_QUOTA_EXHAUSTED",
+        "AI service out of credit",
+        "Your file arrived safely, but the AI reading service refused it: its usage balance is empty. Nothing was extracted and nothing was created.",
+        "Top up the AI plan, then upload the file again or send the order as text. Quote the support reference if the problem persists after top-up.",
+        kind="upload",
+        severity="warning",
+    ),
     "INPUT_TOO_LARGE": _d(
         "INPUT_TOO_LARGE",
         "File too large",

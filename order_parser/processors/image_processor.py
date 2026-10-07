@@ -5,7 +5,7 @@ from typing import Any
 
 import structlog
 
-from order_parser.ai.text_parser import TextParser
+from order_parser.ai.text_parser import TextParser, classify_ai_failure
 from order_parser.ai.vision.ocr_service import OCRError, VisionOCRService
 from order_parser.config import get_settings
 from order_parser.core.attachment_store import AttachmentStore
@@ -104,7 +104,7 @@ class ImageProcessor:
             ai_response = self.text_parser.parse(text)
         except Exception as exc:
             logger.warning("vision.interpretation_failed", filename=filename, error=str(exc))
-            return self._failed(filename, "AI_INTERPRETATION_FAILED", str(exc), attachment_meta)
+            return self._failed(filename, classify_ai_failure(exc), str(exc), attachment_meta)
         ai_response["attachment"] = attachment_meta
         order = OrderNormalizer.normalize(ai_response, source="", input_type="image")
         return ParsedOrder(order=order, ai_response=ai_response, extracted_text=text)

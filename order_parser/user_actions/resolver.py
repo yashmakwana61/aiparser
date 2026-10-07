@@ -597,6 +597,7 @@ _BUILDERS = {
     "OCR_UNAVAILABLE": _upload_action_for("OCR_UNAVAILABLE"),
     "OCR_EMPTY": _upload_action_for("OCR_EMPTY"),
     "AI_INTERPRETATION_FAILED": _upload_action_for("AI_INTERPRETATION_FAILED"),
+    "AI_QUOTA_EXHAUSTED": _upload_action_for("AI_QUOTA_EXHAUSTED"),
     "INPUT_TOO_LARGE": _upload_action_for("INPUT_TOO_LARGE"),
     "INPUT_UNSUPPORTED": _upload_action_for("INPUT_UNSUPPORTED"),
 }
