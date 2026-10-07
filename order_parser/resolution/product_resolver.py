@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 
 import structlog
@@ -47,6 +48,35 @@ _GLUE_SPLIT = (
     re.compile(r"([a-zA-Z])(\d)"),
 )
 
+# Unit canonicalization for pack comparison (product-side only).
+PACK_UNIT_SYNONYMS = {
+    "pcs": "pc", "pieces": "pc", "piece": "pc",
+    "gms": "gm", "g": "gm", "gram": "gm", "grams": "gm",
+    "kgs": "kg", "kilo": "kg", "kilos": "kg",
+    "packets": "pkt", "packet": "pkt", "pack": "pkt", "packs": "pkt",
+    "ltr": "l", "liter": "l", "litre": "l", "liters": "l",
+    "mls": "ml", "inch": "in", "inches": "in",
+}
+
+# Bonus added for exact pack agreement (shared count+unit pairs), capped.
+PACK_AGREEMENT_BONUS = 8.0
+
+# Preparation/style words that never prove a mismatch on their own
+# ("plain" missing from a candidate is a refinement question, not evidence
+# the candidate is wrong; "kulcha" missing is).
+GENERIC_MODIFIERS = frozenset({
+    "plain", "fresh", "whole", "soft", "regular", "classic", "special",
+    "premium", "fine", "rich", "plain",
+})
+
+# A token variant this similar to a winner token counts as covered
+# ("bread" vs "breads"), so morphological plurals never veto.
+VARIANT_SIMILARITY = 85.0
+
+
+def canonical_unit(token: str) -> str:
+    return PACK_UNIT_SYNONYMS.get(token, token)
+
 
 def product_tokens(value: str | None) -> str:
     """Product-side normalization: shared normalization plus pack-size splits.
@@ -58,7 +88,35 @@ def product_tokens(value: str | None) -> str:
     text = normalize_name(value)
     for pattern in _GLUE_SPLIT:
         text = pattern.sub(r"\1 \2", text)
-    return " ".join(text.split())
+    return " ".join(canonical_unit(tok) for tok in text.split())
+
+
+def pack_pairs(tokens: list[str]) -> list[tuple[float, str | None]]:
+    """Extract (count, unit) pairs: a number optionally followed by a unit word."""
+    pairs: list[tuple[float, str | None]] = []
+    i = 0
+    while i < len(tokens):
+        try:
+            number = float(tokens[i])
+        except ValueError:
+            i += 1
+            continue
+        unit = None
+        if i + 1 < len(tokens) and tokens[i + 1].isalpha():
+            unit = tokens[i + 1]
+        pairs.append((number, unit))
+        i += 2 if unit else 1
+    return pairs
+
+
+def pack_agreement(input_tokens: list[str], cand_tokens: list[str]) -> float:
+    """0..1: share of the input's unit-qualified pack pairs found in candidate."""
+    wanted = [(n, u) for n, u in pack_pairs(input_tokens) if u is not None]
+    if not wanted:
+        return 0.0
+    have = set(pack_pairs(cand_tokens))
+    hits = sum(1 for pair in wanted if pair in have)
+    return hits / len(wanted)
 
 
 def product_fuzzy_score(query: str, choice: str) -> float:
@@ -80,6 +138,31 @@ def score_product_pair(query: str, choice: str) -> tuple[float, float]:
     token_set = float(fuzz.token_set_ratio(nq, nc))
     legacy = float(max(fuzz.WRatio(nq, nc), fuzz.partial_ratio(nq, nc)))
     return token_set, legacy
+
+
+def idf_weights(tokenized_docs: list[list[str]]) -> dict[str, float]:
+    """Smoothed inverse document frequency over tokenized catalog names."""
+    doc_count = max(1, len(tokenized_docs))
+    doc_freq: dict[str, int] = {}
+    for tokens in tokenized_docs:
+        for token in set(tokens):
+            doc_freq[token] = doc_freq.get(token, 0) + 1
+    return {token: math.log((doc_count + 1) / (freq + 1)) + 1.0
+            for token, freq in doc_freq.items()}
+
+
+def idf_cosine_score(input_tokens: list[str], cand_tokens: list[str],
+                     weights: dict[str, float]) -> float:
+    """IDF-weighted cosine similarity (0-100): distinctive shared tokens win."""
+    shared = set(input_tokens) & set(cand_tokens)
+    if not shared:
+        return 0.0
+    numerator = sum(weights.get(tok, 1.0) ** 2 for tok in shared)
+    input_norm = math.sqrt(sum(weights.get(tok, 1.0) ** 2 for tok in set(input_tokens)))
+    cand_norm = math.sqrt(sum(weights.get(tok, 1.0) ** 2 for tok in set(cand_tokens)))
+    if input_norm <= 0 or cand_norm <= 0:
+        return 0.0
+    return round(100.0 * numerator / (input_norm * cand_norm), 1)
 
 
 class ProductResolver:
@@ -108,6 +191,25 @@ class ProductResolver:
         )
 
     def resolve(self, raw_name: str, partner_id: int | None = None) -> ProductResolution:
+        """Resolve one product name. Refreshes the catalog once on a miss so
+        products created minutes ago (inside the TTL window) are still found."""
+        result = self._resolve_inner(raw_name, partner_id)
+        if result.status == ResolutionStatus.UNRESOLVED and result.reason not in (
+                "missing_product_name", "catalog_unavailable"):
+            try:
+                before = len(self.catalog.products())
+                self.catalog.refresh()
+                after = len(self.catalog.products())
+            except Exception:
+                logger.exception("product.refresh_on_miss_failed", raw_name=raw_name)
+                return result
+            if after != before:
+                logger.info("product.catalog_refreshed_on_miss",
+                            raw_name=raw_name, before=before, after=after)
+                return self._resolve_inner(raw_name, partner_id)
+        return result
+
+    def _resolve_inner(self, raw_name: str, partner_id: int | None = None) -> ProductResolution:
         raw = (raw_name or "").strip()
         if not raw:
             return ProductResolution(raw_name="", status=ResolutionStatus.UNRESOLVED, reason="missing_product_name")
@@ -159,24 +261,29 @@ class ProductResolver:
                 logger.warning("product.alias_target_missing", alias_id=alias.id, target_id=alias.target_id)
 
         # Level 6-8: fuzzy matching with candidate ranking and ambiguity gate.
-        # Token-set matches (shared distinctive tokens over the whole
-        # string) rank first; when nothing clears the bar that way, the
-        # legacy WRatio/partial blend preserves typo tolerance.
-        token_set_hits: list[tuple[float, dict]] = []
+        # IDF-weighted cosine ranks first: distinctive shared tokens
+        # (kulcha, pav) outweigh generic pack tokens (bread, pkt, 6), with a
+        # bonus for exact pack agreement. When nothing clears the bar that
+        # way, the legacy WRatio/partial blend preserves typo tolerance.
+        docs = [product_tokens(str(p.get("name") or "")).split() for p in products]
+        weights = idf_weights(docs)
+        input_tokens = product_tokens(raw).split()
+        idf_hits: list[tuple[float, dict]] = []
         legacy_hits: list[tuple[float, dict]] = []
-        for product in products:
+        for product, cand_tokens in zip(products, docs):
             name = str(product.get("name") or "")
-            token_set, legacy = score_product_pair(raw, name)
+            cosine = idf_cosine_score(input_tokens, cand_tokens, weights)
+            bonus = PACK_AGREEMENT_BONUS * pack_agreement(input_tokens, cand_tokens)
+            idf_score = min(100.0, round(cosine + bonus, 1))
+            _ts, legacy = score_product_pair(raw, name)
             sku = str(product.get("default_code") or "")
             if sku:
-                sku_token_set, sku_legacy = score_product_pair(raw, sku)
-                token_set = max(token_set, sku_token_set)
-                legacy = max(legacy, sku_legacy)
-            if token_set >= self.min_score:
-                token_set_hits.append((round(float(token_set), 1), product))
+                legacy = max(legacy, score_product_pair(raw, sku)[1])
+            if idf_score >= self.min_score:
+                idf_hits.append((idf_score, product))
             elif legacy >= self.min_score:
                 legacy_hits.append((round(float(legacy), 1), product))
-        scored = token_set_hits or legacy_hits
+        scored = idf_hits or legacy_hits
         scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
 
         candidates = [
@@ -188,6 +295,9 @@ class ProductResolver:
         best_score, best_product = scored[0]
         if len(scored) > 1 and (best_score - scored[1][0]) <= self.ambiguity_gap:
             return self._ambiguous(candidates, raw, reason="fuzzy_candidates_too_close")
+        vetoed = self._rare_token_veto(raw, input_tokens, best_product, products, weights)
+        if vetoed is not None:
+            return vetoed
         return ProductResolution(
             raw_name=raw,
             status=ResolutionStatus.RESOLVED,
@@ -206,6 +316,60 @@ class ProductResolver:
                 "taxes_id": list(best_product.get("taxes_id") or []),
             },
         )
+
+    def _rare_token_veto(self, raw: str, input_tokens: list[str], best_product: dict,
+                           products: list[dict], weights: dict[str, float]):
+        """Veto a winner missing the input's rarest cataloged token.
+
+        E.g. "Kulcha 250gm" must never auto-resolve to PAV when kulcha
+        products exist: the rarest input token present in the catalog
+        (kulcha) is absent from the winner while other products carry it.
+        Returns an AMBIGUOUS resolution led by same-token alternatives, or
+        None when the winner stands. Typos (token absent everywhere) never
+        veto, preserving typo tolerance.
+        """
+        winner_tokens = set(product_tokens(str(best_product.get("name") or "")).split())
+        input_set = set(input_tokens)
+        if input_set <= winner_tokens:
+            return None
+        veto_token: str | None = None
+        for tok in sorted(input_set - winner_tokens):
+            if len(tok) <= 2 or tok in GENERIC_MODIFIERS:
+                continue
+            if max((normalized_fuzzy_score(tok, wtok) for wtok in winner_tokens),
+                   default=0.0) >= VARIANT_SIMILARITY:
+                continue
+            doc_freq = sum(1 for p in products
+                           if tok in set(product_tokens(str(p.get("name") or "")).split()))
+            if doc_freq >= 1:
+                veto_token = tok
+                break
+        if veto_token is None:
+            return None
+        rarest = veto_token
+        alternatives = []
+        for product in products:
+            tokens = set(product_tokens(str(product.get("name") or "")).split())
+            if rarest in tokens and product.get("id") != best_product.get("id"):
+                alternatives.append(product)
+        if not alternatives:
+            return None
+        logger.info("product.rare_token_veto", raw_name=raw, token=rarest,
+                    winner=best_product.get("id"), alternatives=len(alternatives))
+        ranked = sorted(
+            alternatives,
+            key=lambda p: (-idf_cosine_score(
+                input_tokens, product_tokens(str(p.get("name") or "")).split(), weights),
+                p.get("id") or 0),
+        )
+        candidates = [
+            {"product_id": best_product["id"], "name": best_product.get("name"),
+             "score": 0.0, "method": FUZZY_MATCH},
+        ]
+        for product in ranked[:MAX_CANDIDATES - 1]:
+            candidates.append({"product_id": product["id"], "name": product.get("name"),
+                               "score": 0.0, "method": "rare_token_match"})
+        return self._ambiguous(candidates, raw, reason="rare_token_mismatch")
 
     @staticmethod
     def _resolved(product: dict, method: str, confidence: float, raw_name: str) -> ProductResolution:

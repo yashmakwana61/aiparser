@@ -99,6 +99,57 @@ def cmd_export_pending(args) -> dict:
     return {"count": len(orders), "path": str(out_path), "bytes": out_path.stat().st_size}
 
 
+def cmd_mine_corrections(args) -> dict:
+    """Aggregate user corrections from the audit archive into alias candidates.
+
+    Repeated identical original->target corrections (default: 2+) are strong
+    alias candidates; corrections without usable targets are reported as
+    data gaps. Read-only; creating aliases stays an explicit human action.
+    """
+    from order_parser.core.audit import audit_day_files
+
+    root = Path(args.dir) if args.dir else None
+    files = audit_day_files(root) if root else audit_day_files()
+    if args.dir and root is not None and root.is_file():
+        files = [root]
+    counter: Counter = Counter()
+    gaps = 0
+    total = 0
+    for path in files:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if entry.get("event") != "user_action":
+                continue
+            if entry.get("action") != "correction_applied":
+                continue
+            total += 1
+            correction = (entry.get("detail") or {}).get("correction") or {}
+            field = str(correction.get("field") or "")
+            original = str(correction.get("original_value") or "").strip()
+            target = correction.get("target") or {}
+            target_id = target.get("product_id", target.get("partner_id"))
+            if field and original and target_id is not None:
+                counter[(field, original, str(target_id))] += 1
+            else:
+                gaps += 1
+    suggestions = [
+        {"field": field, "original_value": original, "target_id": target_id, "times": count}
+        for (field, original, target_id), count in counter.most_common()
+        if count >= max(1, int(args.min_repeats))
+    ]
+    return {"corrections_seen": total, "without_usable_target": gaps,
+            "alias_candidates": suggestions}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="maintenance", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -127,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status", default=None, help="Only export this status (e.g. review)")
     p.add_argument("--out", default=None, help="Output .jsonl path (default pending-export-<ts>.jsonl next to the store)")
     p.set_defaults(func=cmd_export_pending)
+
+    p = sub.add_parser("mine-corrections", help="Suggest aliases from repeated user corrections")
+    p.add_argument("--dir", default=None, help="Audit day file or directory (default <log_dir>/audit)")
+    p.add_argument("--min-repeats", type=int, default=2, help="Minimum repeats to suggest (default 2)")
+    p.set_defaults(func=cmd_mine_corrections)
 
     return parser
 

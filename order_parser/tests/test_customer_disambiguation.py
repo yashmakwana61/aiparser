@@ -302,3 +302,31 @@ def test_targeted_search_degrades_quietly_without_field_support():
                                           zip_code="395001", address="Ghod Dod Road"))
     assert resolved.status == ResolutionStatus.RESOLVED
     assert resolved.partner_id == 2
+
+
+def test_unit_qualifier_forces_ask_despite_fuzzy_win():
+    chain = {
+        1: {"id": 1, "name": "GRAND HOTEL NOIDA", "city": "Noida",
+            "zip": "201301", "street": "Stadium Road", "vat": ""},
+        2: {"id": 2, "name": "GRAND SAKET SUITES", "city": "New Delhi",
+            "zip": "110017", "street": "District Centre", "vat": ""},
+    }
+    resolver = _resolver(FakeOdoo(chain))
+    resolved = resolver.resolve(_customer("Grand Hotel Airport Area"))
+    assert resolved.status == ResolutionStatus.AMBIGUOUS
+    assert resolved.reason == "unit_qualifier_unmatched"
+    ids = {c.get("partner_id") for c in resolved.candidates}
+    assert {1, 2} <= ids
+
+
+def test_matching_unit_tokens_pass_guard():
+    chain = {
+        1: {"id": 1, "name": "GRAND HOTEL NOIDA", "city": "Noida",
+            "zip": "201301", "street": "Stadium Road", "vat": ""},
+        2: {"id": 2, "name": "GRAND HOTEL SAKET", "city": "New Delhi",
+            "zip": "110017", "street": "District Centre", "vat": ""},
+    }
+    resolver = _resolver(FakeOdoo(chain))
+    resolved = resolver.resolve(_customer("Grand Hotel Noida"))
+    assert resolved.status == ResolutionStatus.RESOLVED
+    assert resolved.partner_id == 1

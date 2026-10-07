@@ -46,8 +46,8 @@ def _resolver(tmp_path):
 
 
 def test_pack_size_tokens_split():
-    assert product_tokens("Kulcha Plain 6pcs") == "kulcha plain 6 pcs"
-    assert product_tokens("Bread White 700g") == "bread white 700 g"
+    assert product_tokens("Kulcha Plain 6pcs") == "kulcha plain 6 pc"
+    assert product_tokens("Bread White 700g") == "bread white 700 gm"
     # Shared normalization is untouched: alias keys stay valid.
     from order_parser.resolution.normalization import normalize_name
     assert normalize_name("Bread White 700g") == "bread white 700g"
@@ -83,3 +83,38 @@ def test_exact_and_alias_paths_untouched(tmp_path):
     resolver = _resolver(tmp_path)
     exact = resolver.resolve("BREAD WHITE 700 GMS")
     assert exact.resolution_method == "exact_name" and exact.product_id == 165
+
+
+def test_rare_token_veto_blocks_wrong_winner(tmp_path):
+    from order_parser.resolution.models import ResolutionStatus
+    from order_parser.resolution.product_resolver import (
+        idf_weights, product_tokens)
+
+    resolver = _resolver(tmp_path)
+    products = list(CATALOG) + [
+        {"id": 1568, "name": "PAV 250GM PKT", "default_code": "PAV250",
+         "list_price": 40.0, "uom_id": 1, "taxes_id": []},
+    ]
+    weights = idf_weights([product_tokens(p["name"]).split() for p in products])
+    pav_product = next(p for p in products if p["id"] == 1568)
+    out = resolver._rare_token_veto(
+        "Kulcha 250gm", product_tokens("Kulcha 250gm").split(),
+        pav_product, products, weights)
+    assert out is not None
+    assert out.status == ResolutionStatus.AMBIGUOUS
+    assert any(c.get("product_id") == 753 for c in out.candidates)
+
+
+def test_rare_token_veto_passes_covered_winner(tmp_path):
+    from order_parser.resolution.models import ResolutionStatus
+    from order_parser.resolution.product_resolver import (
+        idf_weights, product_tokens)
+
+    resolver = _resolver(tmp_path)
+    products = list(CATALOG)
+    weights = idf_weights([product_tokens(p["name"]).split() for p in products])
+    kulcha = next(p for p in products if p["id"] == 753)
+    out = resolver._rare_token_veto(
+        "Kulcha Plain 6pcs", product_tokens("Kulcha Plain 6pcs").split(),
+        kulcha, products, weights)
+    assert out is None

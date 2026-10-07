@@ -459,7 +459,8 @@ class CorrectionService:
         except Exception:
             logger.exception("corrections.job_update_failed", case_id=job.job_id)
         self._audit(ctx, actor, "correction_applied",
-                    {"summary": summary, "new_order_id": new_order_id})
+                    {"summary": summary, "new_order_id": new_order_id,
+                     "correction": staged[-1] if staged else {}})
         return {"case_id": job.job_id, "summary": summary, "result": result,
                 "status": self._fresh_status(self.load_case(job.job_id) or ctx)}
 

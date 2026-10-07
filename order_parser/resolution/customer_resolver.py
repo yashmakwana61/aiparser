@@ -55,6 +55,13 @@ def _address_score(customer: CustomerModel, partner: dict) -> tuple[float, bool,
     return round(score, 1), bool(zip_match), bool(city_match)
 
 
+# Tokens too generic to prove a unit mismatch on their own.
+_UNIT_STOPWORDS = frozenset({
+    "hotel", "hotels", "private", "limited", "ltd", "pvt", "co", "company",
+    "india", "group", "the", "and", "of",
+})
+
+
 class CustomerResolver:
     """Deterministic customer identity resolution against Odoo partners.
 
@@ -77,6 +84,26 @@ class CustomerResolver:
         )
 
     def resolve(
+        self,
+        customer: CustomerModel,
+        session_partner_id: int | None = None,
+        staff_partner_id: int | None = None,
+        explicit_reference: int | str | None = None,
+    ) -> CustomerResolution:
+        result = self._resolve_inner(
+            customer,
+            session_partner_id=session_partner_id,
+            staff_partner_id=staff_partner_id,
+            explicit_reference=explicit_reference,
+        )
+        if result.status == ResolutionStatus.RESOLVED and result.resolution_method in (
+                FUZZY_MATCH, VAT_EXACT, ADDRESS_MATCH):
+            guarded = self._apply_unit_guard(customer, result)
+            if guarded is not None:
+                return guarded
+        return result
+
+    def _resolve_inner(
         self,
         customer: CustomerModel,
         session_partner_id: int | None = None,
@@ -508,6 +535,47 @@ class CustomerResolver:
                 entry["city"] = str(city)
             enriched.append(entry)
         return enriched
+
+    def _apply_unit_guard(self, customer: CustomerModel,
+                            resolution: CustomerResolution) -> CustomerResolution | None:
+        """Downgrade a match when the input names a unit the winner lacks.
+
+        E.g. input "Radisson Blu Plaza Delhi Airport" matched to "RADISSON
+        NOIDA" while other Radisson units exist: the location tokens
+        (airport, plaza...) match nothing in the winner, so auto-accepting
+        would bill the wrong unit. Returns an AMBIGUOUS resolution with
+        city-enriched candidates, or None when the match stands.
+        """
+        winner_tokens = set(normalize_name(resolution.partner_name).split())
+        unmatched = [
+            tok for tok in normalize_name(customer.name).split()
+            if len(tok) > 2 and tok not in _UNIT_STOPWORDS and tok not in winner_tokens
+        ]
+        if not unmatched:
+            return None
+        chain = normalize_name(resolution.partner_name).split()
+        chain_head = next((tok for tok in chain if len(tok) > 2), "")
+        if not chain_head:
+            return None
+        siblings = [p for p in self._search([["name", "ilike", chain_head]], limit=10)
+                    if int(p.get("id") or 0) != (resolution.partner_id or 0)]
+        if not siblings:
+            return None
+        logger.warning("customer.unit_qualifier_unmatched",
+                       winner=resolution.partner_name, unmatched=unmatched,
+                       siblings=len(siblings))
+        candidates = [{"partner_id": resolution.partner_id, "name": resolution.partner_name,
+                       "score": resolution.confidence or 0.0, "method": resolution.resolution_method}]
+        for sib in siblings[:MAX_CANDIDATES - 1]:
+            candidates.append({"partner_id": sib["id"], "name": sib.get("name"),
+                               "score": 0.0, "method": "chain_sibling"})
+        return CustomerResolution(
+            status=ResolutionStatus.AMBIGUOUS,
+            source="odoo",
+            reason="unit_qualifier_unmatched",
+            candidates=self._with_cities(candidates),
+            details={"unmatched_tokens": unmatched, "winner": resolution.partner_name},
+        )
 
     def _with_cities(self, candidates: list[dict]) -> list[dict]:
         """Enrich ambiguous candidates with their city for pick buttons."""
