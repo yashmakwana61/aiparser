@@ -262,10 +262,10 @@ class CaseInteractions:
         return status
 
     def _render_case_action(self, case_id: str, expanded: int) -> dict[str, Any]:
-        # The stored candidates predate any product the user created in Odoo
-        # after ingest; re-check Odoo now so the buttons offer it.
+        # Review opens heal stale pending state and re-check Odoo for
+        # products created after ingest, so the buttons are never stale.
         try:
-            self.corrections.refresh_product_candidates(case_id)
+            self.corrections.prepare_review(case_id)
         except Exception:
             pass
         status = self._need_status(case_id)

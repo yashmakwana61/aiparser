@@ -169,13 +169,17 @@ async def get_job_actions(job_id: str, request: Request) -> dict[str, Any]:
     pending_store = getattr(pipeline, "pending_store", None)
     if order_id and pending_store is not None:
         record = pending_store.get(str(order_id))
-    # Review opens re-check Odoo for products created after ingest so the
-    # stored candidate lists are never stale. Best-effort: failures keep
-    # the stored candidates.
+    # Review opens heal stale pending state and re-check Odoo for
+    # products created after ingest so the stored candidate lists are
+    # never stale. Best-effort: failures keep the stored state.
     try:
         from order_parser.user_actions.corrections import CorrectionService
 
-        CorrectionService(job_store, pending_store, pipeline).refresh_product_candidates(job_id)
+        CorrectionService(job_store, pending_store, pipeline).prepare_review(job_id)
+        refreshed = job_store.get(job_id)
+        if refreshed is not None:
+            job = refreshed
+            result = dict(job.result or {})
         if order_id and pending_store is not None:
             record = pending_store.get(str(order_id))
     except Exception:

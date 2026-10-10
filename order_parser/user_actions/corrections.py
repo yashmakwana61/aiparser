@@ -284,6 +284,77 @@ class CorrectionService:
         return self._reprocess(ctx, actor, patches={}, staged=[],
                                summary="Retried with no changes.")
 
+    def prepare_review(self, case_id: str) -> int:
+        """Ready a case for a review open: heal stale state, refresh candidates.
+
+        Repairs records parked as ``pending`` while blocking issues exist
+        (pre-fix image orders could confirm-fail with zero actionable
+        issues), then re-checks Odoo for products added after ingest.
+        Returns the number of product lines with refreshed candidates.
+        Never raises.
+        """
+        try:
+            self.heal_stale_pending(case_id)
+        except Exception:
+            logger.exception("review.heal_failed", case_id=case_id)
+        return self.refresh_product_candidates(case_id)
+
+    def heal_stale_pending(self, case_id: str) -> bool:
+        """Flip ``pending`` records with blocking issues back to ``review``.
+
+        A pending record must be confirmable; when the stored resolution or
+        result still carries blocking codes (e.g. CUSTOMER_UNRESOLVED) the
+        case renders "awaits confirmation" with no issues and CONFIRM can
+        only fail. Healing restores the actionable review state. Returns
+        True when anything was changed. Never raises.
+        """
+        try:
+            return self._heal_stale_pending(case_id)
+        except Exception:
+            logger.exception("review.heal_failed", case_id=case_id)
+            return False
+
+    def _heal_stale_pending(self, case_id: str) -> bool:
+        from order_parser.core import metrics
+
+        ctx = self.load_case(case_id)
+        if ctx is None or ctx.get("record") is None:
+            return False
+        record = ctx["record"]
+        if record.get("status") != "pending":
+            return False
+        resolution = record.get("resolution") or {}
+        blocking = list(resolution.get("blocking") or []) if isinstance(resolution, dict) else []
+        result = dict(ctx.get("result") or {})
+        blocked = list(result.get("resolution_blocked") or [])
+        if not blocking and not blocked:
+            return False
+        record["status"] = "review"
+        if result.get("status") == "pending":
+            result["status"] = "review"
+        result["message"] = "Order sent for manual review."
+        job = ctx["job"]
+        try:
+            job.result = result
+            job.review_required = True
+            job.review_reason = result["message"]
+            self.job_store.save(job)
+        except Exception:
+            logger.exception("review.heal_job_save_failed", case_id=case_id)
+            return False
+        try:
+            self.pending_store.save(record)
+        except Exception:
+            logger.exception("review.heal_record_save_failed", case_id=case_id)
+            return False
+        try:
+            metrics.incr("review_stale_pending_healed_total")
+        except Exception:
+            pass
+        logger.info("review.stale_pending_healed", case_id=case_id,
+                    blocking=blocking or blocked)
+        return True
+
     def refresh_product_candidates(self, case_id: str) -> int:
         """Re-check Odoo for unresolved/ambiguous product lines (review-read path).
 

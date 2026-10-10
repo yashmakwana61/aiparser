@@ -158,3 +158,80 @@ def test_review_refresh_skips_valid_lines_and_missing_names(tmp_path):
     record = pending_store.get("ORD-1")
     assert record["validation"]["products"][1] == {"valid": True, "product_id": 9,
                                                   "candidates": []}
+
+
+# ------------------------------------------------------- stale pending heal
+
+
+def _seed_stuck(job_store, pending_store, job_id="JOB-STUCK", order_id="ORD-STUCK"):
+    """Pre-fix shape: pending record+result while blocking issues exist."""
+    result = {"status": "pending", "order_id": order_id, "job_id": job_id,
+              "customer": "", "items": 1,
+              "resolution_blocked": ["CUSTOMER_UNRESOLVED"],
+              "message": "Order ORD-STUCK awaits confirmation (confidence 95%).",
+              "customer_detail": {"raw_name": "", "resolved": False,
+                                  "partner_id": None, "partner_name": None}}
+    job_store.save(JobRecord(job_id=job_id, source="telegram", sender_id="8751097833",
+                             input_type="image", status=JobStatus.NEEDS_REVIEW,
+                             result=result, review_required=True,
+                             review_reason=result["message"]))
+    pending_store.save({
+        "order_id": order_id, "job_id": job_id, "status": "pending", "source": "telegram",
+        "parsed_order": {"order": _parsed_dict(customer=""),
+                         "ai_response": {}, "extracted_text": ""},
+        "validation": {"customer": {"valid": False, "reason": "customer_info_missing",
+                                    "candidates": []},
+                       "products": [{"valid": True, "product_id": 9, "candidates": []}]},
+        "resolution": {"blocking": ["CUSTOMER_UNRESOLVED"], "blocking_detail": [],
+                       "warnings": [], "missing_information": [], "items": []},
+        "raw": {"job_id": job_id}, "created_at": "2026-10-10T13:00:00+00:00",
+    })
+
+
+def test_heal_flips_stuck_pending_to_review(tmp_path):
+    odoo = FakeOdoo([_product(9, "Kulcha Special")])
+    service, job_store, pending_store = _service(tmp_path, odoo)
+    _seed_stuck(job_store, pending_store)
+
+    assert service.heal_stale_pending("JOB-STUCK") is True
+
+    record = pending_store.get("ORD-STUCK")
+    assert record["status"] == "review"
+    job = job_store.get("JOB-STUCK")
+    assert job.result["status"] == "review"
+    assert job.result["message"] == "Order sent for manual review."
+    assert job.review_required is True
+    # Idempotent: second heal is a no-op.
+    assert service.heal_stale_pending("JOB-STUCK") is False
+
+
+def test_heal_leaves_consistent_pending_alone(tmp_path):
+    odoo = FakeOdoo()
+    service, job_store, pending_store = _service(tmp_path, odoo)
+    _seed_stuck(job_store, pending_store)
+    record = pending_store.get("ORD-STUCK")
+    record["resolution"]["blocking"] = []
+    pending_store.save(record)
+    job = job_store.get("JOB-STUCK")
+    job.result["resolution_blocked"] = []
+    job_store.save(job)
+
+    assert service.heal_stale_pending("JOB-STUCK") is False
+    assert pending_store.get("ORD-STUCK")["status"] == "pending"
+
+
+def test_heal_ignores_review_and_missing_cases(tmp_path):
+    odoo = FakeOdoo()
+    service, job_store, pending_store = _service(tmp_path, odoo)
+    _seed(job_store, pending_store)  # already "review"
+    assert service.heal_stale_pending("JOB-1") is False
+    assert service.heal_stale_pending("JOB-GHOST") is False
+
+
+def test_prepare_review_heals_then_refreshes(tmp_path):
+    odoo = FakeOdoo([_product(1, "Breads")])
+    service, job_store, pending_store = _service(tmp_path, odoo)
+    _seed_stuck(job_store, pending_store)
+    # Stuck record has a valid product line: heal runs, refresh finds nothing.
+    assert service.prepare_review("JOB-STUCK") == 0
+    assert pending_store.get("ORD-STUCK")["status"] == "review"

@@ -42,9 +42,9 @@ async def get_order(order_id: str, request: Request) -> dict:
     record = _pending_store(request).get(order_id)
     if not record:
         raise HTTPException(status_code=404, detail="Order not found")
-    # Review opens re-check Odoo for products created after ingest so
-    # candidate buttons are never stale. Best-effort: failures keep
-    # the stored candidates.
+    # Review opens heal stale pending state and re-check Odoo for
+    # products created after ingest so candidate buttons are never stale.
+    # Best-effort: failures keep the stored state.
     try:
         from order_parser.user_actions.corrections import CorrectionService
 
@@ -52,7 +52,7 @@ async def get_order(order_id: str, request: Request) -> dict:
         if job_id:
             CorrectionService(
                 getattr(request.app.state, "job_store", None),
-                _pending_store(request), pipeline).refresh_product_candidates(job_id)
+                _pending_store(request), pipeline).prepare_review(job_id)
             record = _pending_store(request).get(order_id) or record
     except Exception:
         pass
