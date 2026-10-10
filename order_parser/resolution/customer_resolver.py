@@ -22,7 +22,11 @@ from order_parser.resolution.models import (
     ResolutionStatus,
 )
 from order_parser.resolution.normalization import normalize_name, normalized_variants
-from order_parser.resolution.product_resolver import normalized_fuzzy_score
+from order_parser.resolution.matching import (
+    customer_scorer,  # noqa: F401 (tuned alternative; default stays legacy, see below)
+    legacy_customer_scorer,
+    top_matches,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -262,11 +266,10 @@ class CustomerResolver:
         if name:
             token = normalize_name(name).split()[0] if normalize_name(name) else ""
             pool = self._search([["name", "ilike", token]], limit=50) if token else []
-            scored: list[tuple[float, dict]] = []
-            for partner in pool:
-                score = normalized_fuzzy_score(name, str(partner.get("name") or ""))
-                if score >= self.min_score:
-                    scored.append((round(float(score), 1), partner))
+            pool_names = [str(p.get("name") or "") for p in pool]
+            scored = [(score, pool[idx]) for score, idx in top_matches(
+                pool_names, name, legacy_customer_scorer, self.min_score,
+                processor=normalize_name)]
             scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
             if scored:
                 best_score, best_partner = scored[0]
@@ -330,14 +333,13 @@ class CustomerResolver:
         if not token:
             return []
         pool = self._search([["name", "ilike", token]], limit=25)
-        scored: list[tuple[float, dict]] = []
-        for partner in pool:
-            try:
-                score = normalized_fuzzy_score(name, str(partner.get("name") or ""))
-            except Exception:
-                continue
-            if score >= DISPLAY_CANDIDATE_CUTOFF:
-                scored.append((round(float(score), 1), partner))
+        pool_names = [str(p.get("name") or "") for p in pool]
+        try:
+            scored = [(score, pool[idx]) for score, idx in top_matches(
+                pool_names, name, legacy_customer_scorer, DISPLAY_CANDIDATE_CUTOFF,
+                processor=normalize_name)]
+        except Exception:
+            return []
         scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
         return [
             {"partner_id": p["id"], "name": p.get("name"), "score": s, "method": FUZZY_MATCH}

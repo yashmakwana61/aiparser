@@ -4,10 +4,11 @@ import time
 from typing import Any
 
 import structlog
-from rapidfuzz import fuzz, process
+from rapidfuzz import process
 
 from order_parser.integrations.odoo_client import OdooClient
 from order_parser.models import ItemModel
+from order_parser.resolution.matching import legacy_product_scorer
 
 logger = structlog.get_logger(__name__)
 
@@ -18,9 +19,7 @@ CATALOG_TTL_SECONDS = 1800
 
 
 def _fuzzy_score(query: str, choice: str, **kwargs) -> float:
-    if not choice:
-        return 0.0
-    return max(fuzz.WRatio(query, choice), fuzz.partial_ratio(query, choice))
+    return legacy_product_scorer(query, choice)
 
 
 class ProductValidator:

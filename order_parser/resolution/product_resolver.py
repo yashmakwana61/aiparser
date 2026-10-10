@@ -1,14 +1,22 @@
 from __future__ import annotations
 
-import math
-import re
-
 import structlog
-from rapidfuzz import fuzz
 
 from order_parser.config import get_settings
 from order_parser.resolution.alias_store import AliasStore
 from order_parser.resolution.catalog import CatalogProvider
+from order_parser.resolution.matching import (
+    PACK_AGREEMENT_BONUS,
+    idf_cosine_score,
+    idf_weights,
+    legacy_product_scorer,
+    normalized_fuzzy_score,
+    pack_agreement,
+    product_fuzzy_score,  # noqa: F401 (re-exported for tests/callers)
+    product_tokens,
+    score_product_pair,
+    top_matches,
+)
 from order_parser.resolution.models import (
     CUSTOMER_ALIAS,
     EXACT_NAME,
@@ -27,40 +35,6 @@ logger = structlog.get_logger(__name__)
 MAX_CANDIDATES = 5
 
 
-def fuzzy_score(query: str, choice: str) -> float:
-    if not choice:
-        return 0.0
-    return max(fuzz.WRatio(query, choice), fuzz.partial_ratio(query, choice))
-
-
-def normalized_fuzzy_score(query: str, choice: str) -> float:
-    """Fuzzy score after normalizing both strings (case-insensitive, punctuation removed)."""
-    nq = normalize_name(query)
-    nc = normalize_name(choice)
-    if not nq or not nc:
-        return 0.0
-    return max(fuzz.WRatio(nq, nc), fuzz.partial_ratio(nq, nc))
-
-
-# Digit/letter glue split for FMCG pack sizes: "6pcs" -> "6 pcs".
-_GLUE_SPLIT = (
-    re.compile(r"(\d)([a-zA-Z])"),
-    re.compile(r"([a-zA-Z])(\d)"),
-)
-
-# Unit canonicalization for pack comparison (product-side only).
-PACK_UNIT_SYNONYMS = {
-    "pcs": "pc", "pieces": "pc", "piece": "pc",
-    "gms": "gm", "g": "gm", "gram": "gm", "grams": "gm",
-    "kgs": "kg", "kilo": "kg", "kilos": "kg",
-    "packets": "pkt", "packet": "pkt", "pack": "pkt", "packs": "pkt",
-    "ltr": "l", "liter": "l", "litre": "l", "liters": "l",
-    "mls": "ml", "inch": "in", "inches": "in",
-}
-
-# Bonus added for exact pack agreement (shared count+unit pairs), capped.
-PACK_AGREEMENT_BONUS = 8.0
-
 # Preparation/style words that never prove a mismatch on their own
 # ("plain" missing from a candidate is a refinement question, not evidence
 # the candidate is wrong; "kulcha" missing is).
@@ -72,97 +46,6 @@ GENERIC_MODIFIERS = frozenset({
 # A token variant this similar to a winner token counts as covered
 # ("bread" vs "breads"), so morphological plurals never veto.
 VARIANT_SIMILARITY = 85.0
-
-
-def canonical_unit(token: str) -> str:
-    return PACK_UNIT_SYNONYMS.get(token, token)
-
-
-def product_tokens(value: str | None) -> str:
-    """Product-side normalization: shared normalization plus pack-size splits.
-
-    Kept OUT of shared ``normalize_name`` on purpose: alias keys and customer
-    matching depend on the stable shared form. Only product fuzzy scoring
-    uses this.
-    """
-    text = normalize_name(value)
-    for pattern in _GLUE_SPLIT:
-        text = pattern.sub(r"\1 \2", text)
-    return " ".join(canonical_unit(tok) for tok in text.split())
-
-
-def pack_pairs(tokens: list[str]) -> list[tuple[float, str | None]]:
-    """Extract (count, unit) pairs: a number optionally followed by a unit word."""
-    pairs: list[tuple[float, str | None]] = []
-    i = 0
-    while i < len(tokens):
-        try:
-            number = float(tokens[i])
-        except ValueError:
-            i += 1
-            continue
-        unit = None
-        if i + 1 < len(tokens) and tokens[i + 1].isalpha():
-            unit = tokens[i + 1]
-        pairs.append((number, unit))
-        i += 2 if unit else 1
-    return pairs
-
-
-def pack_agreement(input_tokens: list[str], cand_tokens: list[str]) -> float:
-    """0..1: share of the input's unit-qualified pack pairs found in candidate."""
-    wanted = [(n, u) for n, u in pack_pairs(input_tokens) if u is not None]
-    if not wanted:
-        return 0.0
-    have = set(pack_pairs(cand_tokens))
-    hits = sum(1 for pair in wanted if pair in have)
-    return hits / len(wanted)
-
-
-def product_fuzzy_score(query: str, choice: str) -> float:
-    """Pack-size-aware product similarity (0-100).
-
-    Prefers ``token_set_ratio`` (shared distinctive tokens over the whole
-    string) and falls back to the legacy WRatio/partial blend (typo
-    tolerance, e.g. "Lappy" vs "Laptop 15"). See ``score_product_pair``.
-    """
-    ts, legacy = score_product_pair(query, choice)
-    return max(ts, legacy)
-
-
-def score_product_pair(query: str, choice: str) -> tuple[float, float]:
-    """Return ``(token_set_score, legacy_score)`` for a product pair."""
-    nq, nc = product_tokens(query), product_tokens(choice)
-    if not nq or not nc:
-        return 0.0, 0.0
-    token_set = float(fuzz.token_set_ratio(nq, nc))
-    legacy = float(max(fuzz.WRatio(nq, nc), fuzz.partial_ratio(nq, nc)))
-    return token_set, legacy
-
-
-def idf_weights(tokenized_docs: list[list[str]]) -> dict[str, float]:
-    """Smoothed inverse document frequency over tokenized catalog names."""
-    doc_count = max(1, len(tokenized_docs))
-    doc_freq: dict[str, int] = {}
-    for tokens in tokenized_docs:
-        for token in set(tokens):
-            doc_freq[token] = doc_freq.get(token, 0) + 1
-    return {token: math.log((doc_count + 1) / (freq + 1)) + 1.0
-            for token, freq in doc_freq.items()}
-
-
-def idf_cosine_score(input_tokens: list[str], cand_tokens: list[str],
-                     weights: dict[str, float]) -> float:
-    """IDF-weighted cosine similarity (0-100): distinctive shared tokens win."""
-    shared = set(input_tokens) & set(cand_tokens)
-    if not shared:
-        return 0.0
-    numerator = sum(weights.get(tok, 1.0) ** 2 for tok in shared)
-    input_norm = math.sqrt(sum(weights.get(tok, 1.0) ** 2 for tok in set(input_tokens)))
-    cand_norm = math.sqrt(sum(weights.get(tok, 1.0) ** 2 for tok in set(cand_tokens)))
-    if input_norm <= 0 or cand_norm <= 0:
-        return 0.0
-    return round(100.0 * numerator / (input_norm * cand_norm), 1)
 
 
 class ProductResolver:
@@ -269,21 +152,28 @@ class ProductResolver:
         weights = idf_weights(docs)
         input_tokens = product_tokens(raw).split()
         idf_hits: list[tuple[float, dict]] = []
-        legacy_hits: list[tuple[float, dict]] = []
         for product, cand_tokens in zip(products, docs):
             name = str(product.get("name") or "")
             cosine = idf_cosine_score(input_tokens, cand_tokens, weights)
             bonus = PACK_AGREEMENT_BONUS * pack_agreement(input_tokens, cand_tokens)
             idf_score = min(100.0, round(cosine + bonus, 1))
-            _ts, legacy = score_product_pair(raw, name)
-            sku = str(product.get("default_code") or "")
-            if sku:
-                legacy = max(legacy, score_product_pair(raw, sku)[1])
             if idf_score >= self.min_score:
                 idf_hits.append((idf_score, product))
-            elif legacy >= self.min_score:
-                legacy_hits.append((round(float(legacy), 1), product))
-        scored = idf_hits or legacy_hits
+        scored = idf_hits
+        if not scored:
+            # Legacy typo-tolerant tier via engine-side cutoff.
+            names = [str(p.get("name") or "") for p in products]
+            skus = [str(p.get("default_code") or "") for p in products]
+            legacy_by_index: dict[int, float] = {}
+            for score, idx in top_matches(names, raw, legacy_product_scorer,
+                                          self.min_score, processor=product_tokens):
+                legacy_by_index[idx] = max(legacy_by_index.get(idx, 0.0), score)
+            for score, idx in top_matches(skus, raw, legacy_product_scorer,
+                                          self.min_score, processor=product_tokens):
+                legacy_by_index[idx] = max(legacy_by_index.get(idx, 0.0), score)
+            legacy_hits = [(round(score, 1), products[idx])
+                           for idx, score in legacy_by_index.items()]
+            scored = legacy_hits
         scored.sort(key=lambda pair: (-pair[0], pair[1].get("id") or 0))
 
         candidates = [
