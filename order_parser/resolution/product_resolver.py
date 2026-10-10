@@ -184,7 +184,20 @@ class ProductResolver:
             return ProductResolution(raw_name=raw, status=ResolutionStatus.UNRESOLVED, reason="no_candidate_above_cutoff")
         best_score, best_product = scored[0]
         if len(scored) > 1 and (best_score - scored[1][0]) <= self.ambiguity_gap:
-            return self._ambiguous(candidates, raw, reason="fuzzy_candidates_too_close")
+            # Enrich ties with same-rare-token products so an obviously
+            # relevant family is offered even when it scores just below.
+            shown_ids = {p["id"] for _, p in scored[:MAX_CANDIDATES]}
+            _token, holders = self._rare_token_holders(
+                input_tokens,
+                [set(product_tokens(str(p.get("name") or "")).split())
+                 for _, p in scored[:MAX_CANDIDATES]],
+                products, weights)
+            extra = [h for h in holders if h["id"] not in shown_ids][:2]
+            enriched = candidates + [
+                {"product_id": h["id"], "name": h["name"], "score": 0.0,
+                 "method": "rare_token_match"} for h in extra
+            ]
+            return self._ambiguous(enriched, raw, reason="fuzzy_candidates_too_close")
         vetoed = self._rare_token_veto(raw, input_tokens, best_product, products, weights)
         if vetoed is not None:
             return vetoed
@@ -206,6 +219,34 @@ class ProductResolver:
                 "taxes_id": list(best_product.get("taxes_id") or []),
             },
         )
+
+    def _rare_token_holders(self, input_tokens: list[str], exclude: list[set[str]],
+                              products: list[dict], weights: dict[str, float],
+                              limit: int = 2) -> tuple[str | None, list[dict]]:
+        """Products carrying an input token none of the tied leaders have.
+
+        Returns (token, holders ranked by IDF score). Used to enrich
+        near-tie candidate lists so an obviously-relevant family (kulcha)
+        is offered alongside score leaders (burgers).
+        """
+        excluded = set().union(*exclude) if exclude else set()
+        for tok in sorted(set(input_tokens)):
+            if len(tok) <= 2 or tok in GENERIC_MODIFIERS:
+                continue
+            if tok.replace(".", "", 1).isdigit():
+                continue  # pack counts are not identity evidence
+            if tok in excluded:
+                continue
+            holders = [p for p in products
+                       if tok in set(product_tokens(str(p.get("name") or "")).split())]
+            if holders:
+                holders.sort(key=lambda p: (
+                    -idf_cosine_score(input_tokens,
+                                      product_tokens(str(p.get("name") or "")).split(),
+                                      weights),
+                    p.get("id") or 0))
+                return tok, holders[:limit]
+        return None, []
 
     def _rare_token_veto(self, raw: str, input_tokens: list[str], best_product: dict,
                            products: list[dict], weights: dict[str, float]):
