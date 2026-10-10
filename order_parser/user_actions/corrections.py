@@ -284,6 +284,129 @@ class CorrectionService:
         return self._reprocess(ctx, actor, patches={}, staged=[],
                                summary="Retried with no changes.")
 
+    def refresh_product_candidates(self, case_id: str) -> int:
+        """Re-check Odoo for unresolved/ambiguous product lines (review-read path).
+
+        Staff often create the missing product in Odoo and then reopen the
+        review: the stored validation candidates predate that change, so this
+        re-resolves every still-invalid product line against a freshly
+        fetched catalog and persists the new candidate lists into the pending
+        record. Display-only: statuses, codes and resolutions are untouched —
+        the user still confirms with one tap via the normal pick flow.
+
+        Returns the number of lines whose candidates changed. Never raises:
+        any failure (no record, completed case, Odoo down) keeps the stored
+        candidates and returns 0.
+        """
+        try:
+            return self._refresh_product_candidates(case_id)
+        except Exception:
+            logger.exception("review.refresh_candidates_failed", case_id=case_id)
+            return 0
+
+    def _refresh_product_candidates(self, case_id: str) -> int:
+        from order_parser.core import metrics
+        from order_parser.resolution.models import ResolutionStatus
+
+        ctx = self.load_case(case_id)
+        if ctx is None or ctx.get("record") is None:
+            return 0
+        job = ctx["job"]
+        try:
+            status_value = job.status.value if hasattr(job.status, "value") else str(job.status)
+        except Exception:
+            status_value = ""
+        if status_value == "COMPLETED":
+            return 0
+        record = ctx["record"]
+        resolver = self.resolver or getattr(self.pipeline, "resolver", None)
+        product_resolver = getattr(resolver, "products", None)
+        if product_resolver is None or self.pending_store is None:
+            return 0
+        try:
+            parsed = ParsedOrder.model_validate(record["parsed_order"])
+        except Exception:
+            return 0
+        validation = record.get("validation")
+        if not isinstance(validation, dict):
+            return 0
+        entries = validation.get("products")
+        if not isinstance(entries, list) or not entries:
+            return 0
+        items = list(parsed.order.items)
+        if not items:
+            return 0
+        partner_id = None
+        try:
+            customer = (record.get("resolution") or {}).get("customer") or {}
+            if isinstance(customer, dict) and customer.get("partner_id") is not None:
+                partner_id = int(customer["partner_id"])
+        except (TypeError, ValueError):
+            partner_id = None
+
+        catalog = getattr(product_resolver, "catalog", None)
+        if catalog is not None and hasattr(catalog, "invalidate"):
+            try:
+                catalog.invalidate()
+            except Exception:
+                logger.exception("review.catalog_invalidate_failed", case_id=case_id)
+
+        changed = 0
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, dict) or entry.get("valid"):
+                continue
+            if index >= len(items):
+                continue
+            raw_name = str(getattr(items[index], "product_name", "") or "").strip()
+            if not raw_name:
+                continue
+            try:
+                fresh = product_resolver.resolve(raw_name, partner_id)
+            except Exception:
+                logger.exception("review.resolve_failed", case_id=case_id,
+                                 item_index=index, raw_name=raw_name)
+                continue
+            fresh_candidates = [
+                {"product_id": c.get("product_id"),
+                 "product_name": str(c.get("product_name") or c.get("name") or ""),
+                 "name": str(c.get("name") or c.get("product_name") or ""),
+                 "score": c.get("score"),
+                 "method": c.get("method")}
+                for c in (getattr(fresh, "candidates", None) or [])
+                if isinstance(c, dict) and c.get("product_id") is not None
+            ]
+            if getattr(fresh, "status", None) == ResolutionStatus.RESOLVED and getattr(
+                    fresh, "product_id", None) is not None:
+                resolved_name = str(getattr(fresh, "product_name", "") or raw_name)
+                fresh_candidates = [{"product_id": fresh.product_id,
+                                     "product_name": resolved_name,
+                                     "name": resolved_name,
+                                     "score": getattr(fresh, "confidence", 100.0),
+                                     "method": getattr(fresh, "resolution_method", "")}
+                                    ] + [c for c in fresh_candidates
+                                         if c.get("product_id") != fresh.product_id]
+            if not fresh_candidates:
+                continue
+            old_ids = [c.get("product_id") for c in (entry.get("candidates") or [])
+                       if isinstance(c, dict)]
+            new_ids = [c.get("product_id") for c in fresh_candidates]
+            if old_ids == new_ids:
+                continue
+            entry["candidates"] = fresh_candidates[:5]
+            changed += 1
+        if changed:
+            try:
+                self.pending_store.save(record)
+            except Exception:
+                logger.exception("review.refresh_persist_failed", case_id=case_id)
+                return 0
+            try:
+                metrics.incr("review_candidates_refreshed_total", lines=str(changed))
+            except Exception:
+                pass
+            logger.info("review.candidates_refreshed", case_id=case_id, lines=changed)
+        return changed
+
     def cancel_case(self, case_id: str, actor: str) -> dict[str, Any]:
         ctx = self.load_case(case_id)
         if ctx is None:

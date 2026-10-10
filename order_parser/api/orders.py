@@ -38,9 +38,24 @@ async def list_orders(
 
 @router.get("/{order_id}")
 async def get_order(order_id: str, request: Request) -> dict:
+    pipeline = _pipeline(request)
     record = _pending_store(request).get(order_id)
     if not record:
         raise HTTPException(status_code=404, detail="Order not found")
+    # Review opens re-check Odoo for products created after ingest so
+    # candidate buttons are never stale. Best-effort: failures keep
+    # the stored candidates.
+    try:
+        from order_parser.user_actions.corrections import CorrectionService
+
+        job_id = str(record.get("job_id") or "")
+        if job_id:
+            CorrectionService(
+                getattr(request.app.state, "job_store", None),
+                _pending_store(request), pipeline).refresh_product_candidates(job_id)
+            record = _pending_store(request).get(order_id) or record
+    except Exception:
+        pass
     return {"order": record}
 
 

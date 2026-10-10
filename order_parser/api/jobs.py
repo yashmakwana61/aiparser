@@ -169,6 +169,17 @@ async def get_job_actions(job_id: str, request: Request) -> dict[str, Any]:
     pending_store = getattr(pipeline, "pending_store", None)
     if order_id and pending_store is not None:
         record = pending_store.get(str(order_id))
+    # Review opens re-check Odoo for products created after ingest so the
+    # stored candidate lists are never stale. Best-effort: failures keep
+    # the stored candidates.
+    try:
+        from order_parser.user_actions.corrections import CorrectionService
+
+        CorrectionService(job_store, pending_store, pipeline).refresh_product_candidates(job_id)
+        if order_id and pending_store is not None:
+            record = pending_store.get(str(order_id))
+    except Exception:
+        pass
     # Same option lists the Telegram renderer uses (best-effort).
     uom_options: list[str] | None = None
     tax_options: list[dict[str, Any]] | None = None

@@ -56,6 +56,16 @@ class CatalogProvider:
             self._products = []
             self._ensure_fresh()
 
+    def invalidate(self) -> None:
+        """Expire the TTL without dropping the current snapshot.
+
+        The next access refetches from Odoo; if that fetch fails the
+        previous snapshot is retained (unlike :meth:`refresh`, which
+        clears first). Safe to call on read paths such as review opens.
+        """
+        with self._lock:
+            self._loaded_at = 0.0
+
     def products(self) -> list[dict]:
         with self._lock:
             try:

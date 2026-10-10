@@ -262,6 +262,12 @@ class CaseInteractions:
         return status
 
     def _render_case_action(self, case_id: str, expanded: int) -> dict[str, Any]:
+        # The stored candidates predate any product the user created in Odoo
+        # after ingest; re-check Odoo now so the buttons offer it.
+        try:
+            self.corrections.refresh_product_candidates(case_id)
+        except Exception:
+            pass
         status = self._need_status(case_id)
         text, keyboard = R.render_case(status, expanded=max(0, expanded))
         return {"text": text, "keyboard": keyboard, "toast": None, "edit": True}
