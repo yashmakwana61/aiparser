@@ -116,6 +116,24 @@ async def lifespan(app: FastAPI):
     catalog = CatalogProvider(odoo)
     resolver = OrderResolver(odoo=odoo, catalog=catalog, alias_store=alias_store)
 
+    # Report-only alias hygiene at boot: dangling targets (e.g. after an
+    # Odoo catalog rebuild) are logged, never auto-mutated. Use the
+    # validate-aliases maintenance command to deactivate them explicitly.
+    try:
+        catalog_ids = {int(p["id"]) for p in catalog.products() if p.get("id") is not None}
+
+        def _partner_alive(partner_id: int) -> bool:
+            try:
+                return odoo.get_partner(int(partner_id)) is not None
+            except Exception:
+                return True
+
+        dead = alias_store.validate_targets(catalog_ids, _partner_alive)
+        if dead["product"] or dead["customer"]:
+            logger.warning("startup.dead_alias_targets", dead=dead)
+    except Exception:
+        logger.exception("startup.alias_validation_failed")
+
     pipeline = OrderPipeline(odoo, resolver=resolver)
     app.state.pipeline = pipeline
     app.state.odoo = odoo

@@ -15,9 +15,13 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+import structlog
+
 from order_parser.core.audit import verify_audit_directory
 from order_parser.core.pending_store import PendingStore
 from order_parser.core.retention import prune_sessions
+
+logger = structlog.get_logger(__name__)
 
 
 def _settings():
@@ -150,6 +154,39 @@ def cmd_mine_corrections(args) -> dict:
             "alias_candidates": suggestions}
 
 
+def cmd_validate_aliases(args) -> dict:
+    """Report (and optionally deactivate) aliases with missing targets."""
+    from order_parser.integrations.odoo_client import OdooClient
+    from order_parser.resolution.alias_store import AliasStore
+    from order_parser.resolution.catalog import CatalogProvider
+
+    store = AliasStore(args.store_dir) if args.store_dir else AliasStore()
+    try:
+        catalog_ids = {int(p["id"]) for p in CatalogProvider(OdooClient()).products()
+                       if p.get("id") is not None}
+    except Exception:
+        logger.exception("maintenance.catalog_unavailable")
+        return {"error": "catalog unavailable", "dead": {}, "deactivated": []}
+    odoo = OdooClient()
+
+    def partner_exists(partner_id: int) -> bool:
+        try:
+            return odoo.get_partner(int(partner_id)) is not None
+        except Exception:
+            return True  # benefit of the doubt on transient errors
+
+    dead = store.validate_targets(catalog_ids, partner_exists)
+    deactivated: list[dict] = []
+    if args.deactivate:
+        for entity in ("product", "customer"):
+            for entry in dead[entity]:
+                if store.deactivate(entity, entry["id"], deactivated_by="maintenance"):
+                    deactivated.append({"entity": entity, "id": entry["id"],
+                                        "raw_alias": entry["raw_alias"]})
+    return {"dead": dead, "deactivated": deactivated,
+            "deactivated_count": len(deactivated)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="maintenance", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -183,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dir", default=None, help="Audit day file or directory (default <log_dir>/audit)")
     p.add_argument("--min-repeats", type=int, default=2, help="Minimum repeats to suggest (default 2)")
     p.set_defaults(func=cmd_mine_corrections)
+
+    p = sub.add_parser("validate-aliases", help="Report aliases pointing at missing products/partners")
+    p.add_argument("--store-dir", default=None, help="Alias store directory (default from settings)")
+    p.add_argument("--deactivate", action="store_true", help="Deactivate dead aliases (default: report only)")
+    p.set_defaults(func=cmd_validate_aliases)
 
     return parser
 

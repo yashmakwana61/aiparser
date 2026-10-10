@@ -246,6 +246,50 @@ class AliasStore:
             logger.info("alias.deactivated", entity=entity, alias_id=alias_id, by=deactivated_by)
             return True
 
+    def validate_targets(
+        self,
+        product_ids: set[int] | None = None,
+        partner_exists=None,
+    ) -> dict[str, list[dict]]:
+        """Report active aliases whose targets no longer exist. Read-only.
+
+        ``product_ids``: live catalog ids (None skips the product check).
+        ``partner_exists``: callable ``(partner_id) -> bool`` (None skips
+        the customer check). Semantic wrongness (right id, wrong unit) can
+        only be judged by humans — this catches dangling references from
+        catalog rebuilds.
+        """
+        dead: dict[str, list[dict]] = {"product": [], "customer": []}
+        with self._lock:
+            products = self._load("product")
+            customers = self._load("customer")
+        if product_ids is not None:
+            live = {int(pid) for pid in product_ids}
+            for record in products.values():
+                if record.active and int(record.target_id) not in live:
+                    dead["product"].append(self._describe(record))
+        if partner_exists is not None:
+            for record in customers.values():
+                if not record.active:
+                    continue
+                try:
+                    alive = bool(partner_exists(int(record.target_id)))
+                except Exception:
+                    logger.exception("alias.target_check_failed", alias_id=record.id)
+                    continue
+                if not alive:
+                    dead["customer"].append(self._describe(record))
+        if dead["product"] or dead["customer"]:
+            logger.warning("alias.dead_targets_found",
+                           products=len(dead["product"]), customers=len(dead["customer"]))
+        return dead
+
+    @staticmethod
+    def _describe(record: AliasRecord) -> dict:
+        return {"id": record.id, "raw_alias": record.raw_alias,
+                "target_id": record.target_id, "usage_count": record.usage_count,
+                "created_by": record.created_by, "created_at": record.created_at}
+
     def list_aliases(
         self,
         entity: str,
