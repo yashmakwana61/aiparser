@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     ai_text_model: str = Field(default="gpt-4.1")
     ai_vision_model: str = Field(default="gpt-4o")
 
+    # AI-assisted matching (Phase 44): LLM tiebreaker for ambiguous lines.
+    # Off by default; when enabled the model only SELECTS from bounded
+    # candidate sets (never invents), batched to one call per order.
+    ai_match_enabled: bool = Field(default=False)
+    ai_match_model: str = Field(default="gpt-4.1-mini")
+    ai_match_attempts: int = Field(default=2)
+    ai_match_max_candidates: int = Field(default=8)
+    # AI picks at/above this confidence resolve deterministically (gated
+    # into DETERMINISTIC_METHODS via AI_MATCH); below it they only
+    # pre-rank the pick buttons.
+    ai_match_auto_threshold: float = Field(default=95.0)
+
     # AI gateway resilience (Phase 12). Gateway calls get a configurable
     # socket timeout and transient failures (network errors, retryable HTTP
     # statuses, malformed bodies) are retried with linear backoff. Parsers

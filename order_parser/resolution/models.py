@@ -54,6 +54,13 @@ COMPANY_DEFAULT = "company_default"
 # Authoritative for the order; never modifies Odoo master data.
 HUMAN_OVERRIDE = "human_override"
 
+# LLM-assisted match from the AI tiebreaker (Phase 44). AI_MATCH is only
+# ever assigned at/above ai_match_auto_threshold with a validated
+# (offered-set) id; lower-confidence picks use AI_MATCH_SUGGEST and merely
+# pre-rank the buttons.
+AI_MATCH = "ai_match"
+AI_MATCH_SUGGEST = "ai_match_suggest"
+
 # Address / GSTIN disambiguation between equally-plausible name matches.
 ADDRESS_MATCH = "address_match"
 
@@ -73,6 +80,7 @@ DETERMINISTIC_METHODS = {
     ALIAS_MATCH,
     ADDRESS_MATCH,
     HUMAN_OVERRIDE,
+    AI_MATCH,
 }
 
 # Fuzzy-only matches are capped below AUTO_CREATE_THRESHOLD so they land in the

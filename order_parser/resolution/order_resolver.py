@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -68,12 +69,14 @@ class OrderResolver:
         pending_store=None,
         settings=None,
         conversions_path: str | Path | None = None,
+        ai_matcher=None,
     ):
         self.odoo = odoo
         self.settings = settings or get_settings()
         self.alias_store = alias_store or AliasStore()
         self.catalog = catalog or CatalogProvider(odoo)
         self.pending_store = pending_store
+        self.ai_matcher = ai_matcher
 
         self.products = ProductResolver(self.catalog, self.alias_store, self.settings)
         self.customers = CustomerResolver(odoo, self.alias_store, self.settings)
@@ -406,6 +409,8 @@ class OrderResolver:
                 BlockingIssue(code=DUPLICATE_ORDER, message=f"Duplicate of recently ingested order {duplicate_of}")
             )
 
+        self._apply_ai_matches(order, resolved_items, blocking, customer_resolution)
+
         return ResolvedOrder(
             order=order,
             customer=customer_resolution,
@@ -422,6 +427,131 @@ class OrderResolver:
             order=order,
             blocking_issues=[BlockingIssue(code=RESOLUTION_FAILED, message="Resolution layer failed; manual review required")],
         )
+
+    def _apply_ai_matches(self, order, resolved_items, blocking, customer_resolution) -> None:
+        """LLM tiebreaker over ambiguous lines (Phase 44): one batched call.
+
+        Only runs when enabled. Picks are validated against the offered
+        candidate sets (hallucinated ids ignored). High-confidence picks
+        resolve deterministically; lower ones merely pre-rank the buttons.
+        Customer ambiguity is re-ranked, never auto-accepted. Any transport
+        failure degrades silently to the existing button flow.
+        """
+        from order_parser.resolution.models import (
+            AI_MATCH,
+            AI_MATCH_SUGGEST,
+            PRODUCT_AMBIGUOUS,
+            PRODUCT_UNRESOLVED,
+            ResolutionStatus,
+        )
+
+        settings = self.settings
+        if not bool(getattr(settings, "ai_match_enabled", False)):
+            return
+        try:
+            if self.ai_matcher is None:
+                from order_parser.ai.matcher import AIMatcher
+
+                self.ai_matcher = AIMatcher(settings=settings)
+            matcher = self.ai_matcher
+        except Exception:
+            logger.exception("resolver.ai_matcher_unavailable")
+            return
+        threshold = float(getattr(settings, "ai_match_auto_threshold", 95.0) or 95.0)
+
+        todo: list[dict] = []
+        by_index: dict[int, Any] = {}
+        for resolved_item in resolved_items:
+            product = resolved_item.product
+            if product.status == ResolutionStatus.RESOLVED:
+                continue
+            candidates = [c for c in (product.candidates or []) if isinstance(c, dict)]
+            if not candidates and product.status != ResolutionStatus.AMBIGUOUS:
+                continue
+            if not candidates:
+                continue
+            index = resolved_item.index
+            by_index[index] = resolved_item
+            item = resolved_item.item
+            todo.append({
+                "index": index,
+                "raw_name": product.raw_name,
+                "quantity": getattr(item, "quantity", None),
+                "uom": getattr(item, "uom", None),
+                "price": getattr(item, "unit_price", None),
+                "candidates": [
+                    {"id": c.get("product_id"), "name": str(c.get("product_name") or c.get("name") or ""),
+                     "price": (c.get("details") or {}).get("list_price") if isinstance(c.get("details"), dict) else None,
+                     "uom": None}
+                    for c in candidates
+                ],
+            })
+        try:
+            picks = matcher.match_products(todo) if todo else {}
+        except Exception:
+            logger.exception("resolver.ai_match_failed")
+            return
+        for index, pick in picks.items():
+            resolved_item = by_index.get(index)
+            if resolved_item is None:
+                continue
+            product = resolved_item.product
+            offered = {c.get("product_id"): c for c in (product.candidates or [])
+                       if isinstance(c, dict)}
+            target = offered.get(pick.get("product_id"))
+            if target is None:
+                continue
+            confidence = float(pick.get("confidence") or 0)
+            target_name = str(target.get("product_name") or target.get("name") or "")
+            if confidence >= threshold:
+                product.status = ResolutionStatus.RESOLVED
+                product.resolution_method = AI_MATCH
+                product.value = target_name
+                product.confidence = min(confidence, 100.0)
+                product.reference_id = target.get("product_id")
+                product.product_id = target.get("product_id")
+                product.product_name = target_name
+                product.details = {**(product.details or {}), "ai_reason": pick.get("reason", ""),
+                                   "ai_model": getattr(matcher, "model", "")}
+                before = len(blocking)
+                blocking[:] = [issue for issue in blocking
+                               if not (issue.code in (PRODUCT_AMBIGUOUS, PRODUCT_UNRESOLVED)
+                                       and issue.item_index == index)]
+                logger.info("resolver.ai_match_accepted", item_index=index,
+                            product_id=target.get("product_id"), confidence=confidence,
+                            removed_issues=before - len(blocking))
+            else:
+                product.resolution_method = AI_MATCH_SUGGEST
+                product.details = {**(product.details or {}), "ai_suggested_id": target.get("product_id"),
+                                   "ai_confidence": confidence,
+                                   "ai_model": getattr(matcher, "model", "")}
+                ordered = [c for c in (product.candidates or [])
+                           if c.get("product_id") == target.get("product_id")]
+                ordered += [c for c in (product.candidates or [])
+                            if c.get("product_id") != target.get("product_id")]
+                product.candidates = ordered
+                logger.info("resolver.ai_match_suggested", item_index=index,
+                            product_id=target.get("product_id"), confidence=confidence)
+
+        if customer_resolution.status == ResolutionStatus.AMBIGUOUS:
+            candidates = [c for c in (customer_resolution.candidates or []) if isinstance(c, dict)]
+            if candidates:
+                try:
+                    ranking = matcher.rank_customers(
+                        (order.customer.name or "").strip(), candidates)
+                except Exception:
+                    logger.exception("resolver.ai_rank_failed")
+                    ranking = []
+                if ranking:
+                    by_id = {c.get("partner_id"): c for c in candidates}
+                    customer_resolution.candidates = [
+                        by_id[pid] for pid in ranking if pid in by_id
+                    ] + [c for c in candidates if c.get("partner_id") not in ranking]
+                    customer_resolution.details = {
+                        **(customer_resolution.details or {}),
+                        "ai_ranked": True, "ai_model": getattr(matcher, "model", "")}
+                    logger.info("resolver.ai_customer_reranked",
+                                order=[c.get("partner_id") for c in customer_resolution.candidates])
 
     def _safe(self, fn, fallback, label: str):
         try:
