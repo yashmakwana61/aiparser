@@ -122,8 +122,16 @@ class OrderPipeline:
             validation = self._validate(parsed.order, resolved)
             decision = self.decide(parsed.order.metadata.confidence, validation["is_valid"], resolved)
             if input_type == "image":
-                products_valid = all(r.get("valid") for r in validation.get("products", []))
-                decision = "pending" if products_valid else "review"
+                # Images await confirmation only when the whole order is
+                # actionable: valid products AND a resolved customer.
+                # (Products-only validity previously parked customer-less
+                # orders in "pending", where CONFIRM could only fail and the
+                # case showed no issues to fix.)
+                product_entries = [r for r in (validation.get("products") or [])
+                                   if isinstance(r, dict)]
+                products_valid = bool(product_entries) and all(r.get("valid") for r in product_entries)
+                customer_valid = bool((validation.get("customer") or {}).get("valid"))
+                decision = "pending" if (products_valid and customer_valid) else "review"
             if self.settings.auto_create_all_orders and validation["is_valid"] and (
                 resolved is None
                 or resolved.is_auto_eligible

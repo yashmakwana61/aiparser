@@ -53,6 +53,16 @@ def is_transient_telegram_error(exc: Exception) -> bool:
     return isinstance(exc, TRANSIENT_TELEGRAM_ERRORS)
 
 
+def is_not_modified_error(exc: Exception) -> bool:
+    """True for Telegram's benign 'message is not modified' edit response.
+
+    Editing a message with identical text+markup is a no-op success, not a
+    failure: callers should skip the reply fallback (which would duplicate
+    the message) and skip error logging.
+    """
+    return "message is not modified" in str(exc).lower()
+
+
 async def retry_telegram_call(
     coro_factory: Callable[[], Awaitable[Any]],
     attempts: int = 3,
@@ -315,7 +325,10 @@ class TelegramHandler:
                     await self._with_retry(lambda: edit(text, reply_markup=keyboard))
                     await self._send_follow_up(query, outcome)
                     return
-                except Exception:
+                except Exception as exc:
+                    if is_not_modified_error(exc):
+                        await self._send_follow_up(query, outcome)
+                        return
                     logger.exception("telegram.case_edit_failed")
         await self._reply(query.message, text, **({"reply_markup": keyboard} if keyboard else {}))
         await self._send_follow_up(query, outcome)
