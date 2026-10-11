@@ -18,6 +18,8 @@ from order_parser.resolution.models import (
     CUSTOMER_AMBIGUOUS,
     CUSTOMER_UNRESOLVED,
     DUPLICATE_ORDER,
+    FUZZY_MATCH,
+    FUZZY_REVIEW,
     HUMAN_OVERRIDE,
     PRICE_DEVIATION,
     PRICE_FALLBACK,
@@ -345,6 +347,20 @@ class OrderResolver:
             elif product_resolution.status == ResolutionStatus.UNRESOLVED:
                 blocking.append(
                     BlockingIssue(code=PRODUCT_UNRESOLVED, message=f"Product {item.product_name!r} not resolved", item_index=index)
+                )
+            elif (
+                product_resolution.resolution_method == FUZZY_MATCH
+                and (product_resolution.confidence or 0)
+                < float(getattr(self.settings, "confirm_threshold", 80.0))
+            ):
+                # Fuzzy-only match below the confirmation band: the decision
+                # engine will park the order in review, so surface it as an
+                # actionable item instead of a silent dead end. One tap on
+                # the offered (exact-name) candidate resolves it.
+                warnings.append(
+                    BlockingIssue(code=FUZZY_REVIEW,
+                                  message=f"Uncertain product match for {item.product_name!r} needs confirmation",
+                                  item_index=index)
                 )
 
             # Phase 18: UOM, price, and tax are non-blocking warnings by

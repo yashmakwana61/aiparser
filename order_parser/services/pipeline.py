@@ -377,6 +377,11 @@ class OrderPipeline:
                 )
                 if item.product.resolution_method == FUZZY_MATCH:
                     entry["fuzzy_only"] = True
+                    # Persist the ranked shortlist so review screens can
+                    # offer one-tap confirmation (see FUZZY_REVIEW).
+                    entry["candidates"] = [
+                        c for c in (item.product.candidates or []) if isinstance(c, dict)
+                    ][:5]
             else:
                 reason = item.product.reason or (
                     "ambiguous_product" if item.product.status == ResolutionStatus.AMBIGUOUS else "product_not_found"

@@ -105,6 +105,9 @@ RESOLUTION_FAILED = "RESOLUTION_FAILED"
 # Non-gating warning codes.
 PRICE_DEVIATION = "PRICE_DEVIATION"
 PRICE_FALLBACK = "PRICE_FALLBACK"
+# Fuzzy-only product match whose confidence sits below the confirmation
+# band: the order parks in review and the match needs one human tap.
+FUZZY_REVIEW = "FUZZY_REVIEW"
 
 # Phase 18: Informational warnings for missing non-blocking fields.
 UOM_MISSING_WARNING = "UOM_MISSING"

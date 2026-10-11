@@ -211,6 +211,8 @@ class ProductResolver:
             reference_id=best_product.get("id"),
             product_id=best_product.get("id"),
             product_name=best_product.get("name"),
+            # Keep the ranked shortlist: review screens offer it for one-tap
+            # confirmation when the fuzzy score parks the order in review.
             candidates=candidates,
             details={
                 "default_code": best_product.get("default_code"),
@@ -303,7 +305,8 @@ class ProductResolver:
         return self._ambiguous(candidates, raw, reason="rare_token_mismatch")
 
     @staticmethod
-    def _resolved(product: dict, method: str, confidence: float, raw_name: str) -> ProductResolution:
+    def _resolved(product: dict, method: str, confidence: float, raw_name: str,
+                  candidates: list[dict] | None = None) -> ProductResolution:
         return ProductResolution(
             raw_name=raw_name,
             status=ResolutionStatus.RESOLVED,
@@ -314,6 +317,7 @@ class ProductResolver:
             reference_id=product.get("id"),
             product_id=product.get("id"),
             product_name=product.get("name"),
+            candidates=list(candidates or []),
             details={
                 "default_code": product.get("default_code"),
                 "list_price": product.get("list_price"),

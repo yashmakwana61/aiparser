@@ -93,6 +93,13 @@ REGISTRY: dict[str, ErrorDefinition] = {
         kind="enter_number",
         needs_input=True,
     ),
+    "FUZZY_REVIEW": _d(
+        "FUZZY_REVIEW",
+        "Product match needs confirmation",
+        "I found a likely Odoo product for this line, but the match isn't certain enough to post on its own.",
+        "Confirm the suggested product below, pick another option, or type the exact product name as in Odoo.",
+        severity="warning",
+    ),
     "PRICE_DEVIATION": _d(
         "PRICE_DEVIATION",
         "Price differs from Odoo",
@@ -210,6 +217,14 @@ REGISTRY: dict[str, ErrorDefinition] = {
         severity="warning",
     ),
     # --- fallback ---
+    "MANUAL_REVIEW": _d(
+        "MANUAL_REVIEW",
+        "Needs a quick human check",
+        "This order needs a human look before it can be posted to Odoo, but there's no specific issue to point at. Nothing has been created.",
+        "Retry the check against live Odoo, or cancel the order.",
+        kind="retry",
+        severity="warning",
+    ),
     "INTERNAL_ERROR": _d(
         "INTERNAL_ERROR",
         "Something went wrong",
@@ -231,4 +246,4 @@ def lookup(code: str) -> ErrorDefinition:
 INFRA_BLOCKING_CODES = {"ODOO_UNAVAILABLE", "ODOO_CREATE_FAILED"}
 
 # Warning codes that deserve an optional (non-blocking) user action.
-WARNING_ACTIONABLE = {"PRICE_DEVIATION", "TAX_MISSING"}
+WARNING_ACTIONABLE = {"PRICE_DEVIATION", "TAX_MISSING", "FUZZY_REVIEW"}

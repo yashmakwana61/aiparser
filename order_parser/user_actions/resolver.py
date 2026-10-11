@@ -168,8 +168,11 @@ def build_actions(
     for warning in result.get("resolution_warnings") or resolution.get("warnings") or []:
         if warning in WARNING_ACTIONABLE:
             action = _warning_action(case_id, warning, result, validation, resolution,
-                                     uom_options, tax_options)
+                                     uom_options, tax_options,
+                                     used.setdefault(warning, set()))
             if action is not None:
+                if action.problem.item_index is not None:
+                    used[warning].add(action.problem.item_index)
                 actions.append(action)
 
     # Deduplicate identical action ids, keeping order.
@@ -181,7 +184,31 @@ def build_actions(
         if key not in seen:
             seen.add(key)
             unique.append(action)
+    if not unique and result.get("status") == "review":
+        # Last-resort guard: a review case must never render with nothing
+        # actionable (silent dead end). Retry re-runs resolution against
+        # live Odoo; cancel closes the case.
+        unique.append(_review_fallback_action(case_id))
     return unique
+
+
+def _review_fallback_action(case_id: str) -> UserActionRequired:
+    definition = lookup("MANUAL_REVIEW")
+    problem = Problem(
+        code="MANUAL_REVIEW",
+        title=definition.title,
+        description=definition.explanation,
+        severity=definition.severity,
+        recoverable=True,
+    )
+    return UserActionRequired(
+        case_id=case_id, problem=problem,
+        solution=Solution(kind="retry", instructions=definition.solution),
+        actions=[
+            ActionDefinition(action_id="retry", label="Retry now", verb=VERB_RETRY_CASE, primary=True),
+            ActionDefinition(action_id="cancel", label="Cancel", verb=VERB_CANCEL_CASE),
+        ],
+    )
 
 
 def _generic_action(case_id: str, code: str, definition, context: str) -> UserActionRequired:
@@ -575,12 +602,74 @@ def _upload_action_for(code):
     return build
 
 
+def _fuzzy_action(case_id, definition, result, validation, resolution, parsed_order,
+                  context, uom_options, tax_options, used=None):
+    """One-tap confirmation for a fuzzy-only match parked in review.
+
+    Targets validation entries that resolved fuzzy below the confirmation
+    band (``fuzzy_only``). The top button applies the suggested Odoo
+    product — its catalog name re-resolves exactly, moving the order to
+    confirmation. Typing the exact name works the same way.
+    """
+    items = result.get("items_detail") or []
+    entries = _product_entries(validation)
+    target = None
+    for index, entry in enumerate(entries):
+        if index in (used or set()):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("valid") and entry.get("fuzzy_only"):
+            target = (index, entry)
+            break
+    if target is None:
+        return None
+    index, entry = target
+    raw_name = ""
+    if index < len(items) and isinstance(items[index], dict):
+        raw_name = str(items[index].get("product_name") or "")
+    raw_name = raw_name or str(entry.get("product_name") or "")
+    suggested = str(entry.get("matched_name") or "")
+    candidates = [
+        _candidate(str(c.get("product_name") or c.get("name") or "?"), i,
+                   f"score {c.get('score')}" if c.get("score") is not None else "")
+        for i, c in enumerate(entry.get("candidates") or []) if isinstance(c, dict)
+    ][:5]
+    actions = [
+        ActionDefinition(action_id=f"item-{index}-product", label=f"Use: {c.label}",
+                         verb=VERB_PICK_PRODUCT, item_index=index, candidate_ref=c.ref,
+                         primary=(i == 0))
+        for i, c in enumerate(candidates)
+    ]
+    actions.append(ActionDefinition(action_id=f"item-{index}-product-type",
+                                    label="Type exact product name",
+                                    verb=VERB_ENTER_PRODUCT, item_index=index))
+    description = definition.explanation
+    if suggested:
+        description = f'Suggested match: "{suggested}". ' + description
+    if raw_name:
+        description = f'Requested product: "{raw_name}". ' + description
+    problem = Problem(
+        code=definition.code,
+        title=f"{definition.title} — item #{index + 1}",
+        description=description,
+        field="product",
+        item_index=index,
+        detected_value=raw_name,
+        candidates=candidates,
+        severity=definition.severity,
+        recoverable=True,
+    )
+    return UserActionRequired(case_id=case_id, problem=problem,
+                              solution=Solution(kind="select", instructions=definition.solution),
+                              actions=actions)
 _BUILDERS = {
     "CUSTOMER_UNRESOLVED": _customer_action,
     "CUSTOMER_AMBIGUOUS": _customer_action,
     "COLLECTOR_AS_CUSTOMER": _customer_action,
     "PRODUCT_AMBIGUOUS": _product_action_for("PRODUCT_AMBIGUOUS"),
     "PRODUCT_UNRESOLVED": _product_action_for("PRODUCT_UNRESOLVED"),
+    "FUZZY_REVIEW": _fuzzy_action,
     "UOM_UNRESOLVED": _uom_action,
     "QUANTITY_CONFLICT": _quantity_action,
     "INVALID_QUANTITY": _quantity_action,
@@ -603,9 +692,11 @@ _BUILDERS = {
 }
 
 
-def _warning_action(case_id, code, result, validation, resolution, uom_options, tax_options):
+def _warning_action(case_id, code, result, validation, resolution, uom_options, tax_options, used=None):
     definition = lookup(code)
     builder = _BUILDERS.get(code)
     if builder is None:
         return None
-    return builder(case_id, definition, result, validation, resolution, {}, "", uom_options, tax_options)
+    return builder(case_id, definition, result, validation, resolution, {}, "", uom_options, tax_options, used)
+
+
